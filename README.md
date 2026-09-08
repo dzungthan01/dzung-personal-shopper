@@ -342,16 +342,57 @@ as `"Ridgeway"`. Fixtures drift from reality, but live requests in tests mean a 
 when a store is slow and hammers third parties on every push.
 
 **Currency is cached in a `sync.Map`, not a plain map.** The product endpoint omits currency, so
-it comes from `/meta.json` — a value that is fetched once per store and then read on every poll
-forever. MCP tool handlers run concurrently, so two `check_item` calls can touch that cache at
-the same time. A plain `map` read and written concurrently does not merely return a wrong answer:
-the Go runtime detects it and aborts the process with `fatal error: concurrent map read and map
-write`, which is not recoverable. `sync.Map` locks internally, and its documented sweet spot —
-*written once per key, read many times* — is exactly this access pattern. The cost is a `any`
-value and a type assertion on read, since it predates generics; a `map` behind a `sync.RWMutex`
-would be type-safe but longer. There is a benign cold-cache race: two goroutines can miss and
-both fetch, which costs one duplicate request and stores the same value twice. Closing it needs
-per-key locking or `singleflight`, which is more machinery than a once-per-store fetch deserves.
+it comes from `/meta.json` — fetched once per store, then read on every poll forever. That cache
+has to be safe for concurrent use, and here is the evidence for why.
+
+Two tool calls were sent down one stdio connection, `id: 3` then `id: 4`:
+
+```bash
+{ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"inspect_url","arguments":{"url":"https://frame-store.com/products/x"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"inspect_url","arguments":{"url":"https://www.ssense.com/x"}}}'
+  sleep 6; } | dzung-personal-shopper start
+```
+
+The replies came back in the other order:
+
+```
+id 4: www.ssense.com         unknown
+id 3: frame-store.com        shopify
+```
+
+`id: 4` finished first because SSENSE rejects the request immediately with a `403`, while FRAME
+served a real response. **The handlers ran at the same time** — the server did not wait for one
+call to finish before starting the next. So two `check_item` calls really can touch the currency
+cache simultaneously.
+
+That rules out a plain `map`. A Go map read and written concurrently does not just return a wrong
+value; the runtime detects it and kills the process:
+
+```
+fatal error: concurrent map read and map write
+```
+
+It is a `fatal error`, not a panic — `recover()` cannot catch it, and the program dies mid-request.
+
+`sync.Map` does the locking internally, so the crash is impossible. Its documented sweet spot is
+*"the entry for a given key is written once but read many times"*, which is exactly a store's
+currency. The cost is that it predates generics: it stores `any`, so reads need a type assertion
+(`cached.(string)`).
+
+**Why not `map[string]string` guarded by a `sync.RWMutex`?** It would also work, and it would be
+type-safe with no assertion. It was not chosen because it is more code that must stay correct by
+hand — every read needs `RLock`/`RUnlock` and every write `Lock`/`Unlock`, a forgotten unlock
+deadlocks the server, and taking a read lock where a write happens reintroduces the race the lock
+was meant to prevent. `sync.Map` makes those mistakes unavailable. The tradeoff would be worth
+revisiting if this cache ever needed iteration, deletion, or compound updates, where `sync.Map`'s
+narrow API stops helping and an explicit mutex reads better.
+
+One known wrinkle, on a cold cache only: two goroutines can both miss and both fetch `/meta.json`,
+storing the same value twice. That is a duplicate request, not a wrong answer. Eliminating it
+needs per-key locking or `singleflight`, which is more machinery than a once-per-store fetch
+justifies.
 
 **The database is local and never leaves the machine.** No server, no account, no telemetry; the
 repo ships the schema, each install grows its own data. The cost is that two machines mean two
