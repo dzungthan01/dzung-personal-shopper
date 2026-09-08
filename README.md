@@ -73,6 +73,23 @@ Verified by probing each host's `/meta.json` for a `myshopify_domain`.
 
 The second group is not scraped. See [design decision 3](#3-blocked-retailers-are-designed-around-not-scraped).
 
+Any store can be checked in one command. A Shopify storefront advertises a `myshopify_domain`;
+anything else returns a `403`, a `404`, or JSON without that field:
+
+```bash
+curl -s "https://frame-store.com/meta.json"
+# {"name":"FRAME","currency":"USD","myshopify_domain":"frame-denim.myshopify.com", ...}
+
+curl -s -o /dev/null -w "%{http_code}\n" "https://www.ssense.com/meta.json"
+# 403        (Cloudflare)
+
+curl -s "https://www.sezane.com/meta.json"
+# {}         valid JSON, no shop fields - which is why detection keys on
+#            myshopify_domain rather than on a 200 status
+```
+
+This is exactly what `inspect_url` automates.
+
 ---
 
 ## High level architecture
@@ -277,6 +294,36 @@ drove the endpoint choice too — of Shopify's three product endpoints, only
 | `/products/{handle}.json` | **no** | `"173.00"` string |
 | **`/products/{handle}.js`** | **yes** | **`17300` integer** |
 
+Verified against a live store rather than assumed:
+
+```bash
+curl -s "https://frame-store.com/products/l-homme-slim-lmh0467-ridg.js"
+```
+
+```jsonc
+{
+  "title": "L'Homme Slim -- Ridgeway",
+  "vendor": "frame-denim",
+  "price": 17300,              // integer minor units, not "173.00"
+  "compare_at_price": 24800,   // on sale
+  "available": true,
+  "featured_image": "//cdn.shopify.com/...",   // protocol-relative; needs an https: prefix
+  "options": [
+    {"name": "Color",             "position": 1},
+    {"name": "Pants length type", "position": 2},
+    {"name": "Size",              "position": 3}   // size is NOT option1
+  ],
+  "variants": [
+    {"title": "Ridgeway / 32\" / 28", "option1": "Ridgeway", "option3": "28",
+     "sku": "LMH0467-RIDG-28", "price": 17300, "available": true}
+  ]
+}
+```
+
+Two parser requirements fall out of that payload, and both have tests: `featured_image` is
+protocol-relative and renders as a broken image without an `https:` prefix, and the size axis has
+to be resolved through `options` — here `option1` is a colour.
+
 **LLM-shaped work stays on the Claude side.** Tools return structured facts, never prose, and the
 server makes no model calls of its own. Parsing a messy pasted size list is Claude's job before it
 calls `record_snapshot`. The Go code stays deterministic, testable without a model in the loop,
@@ -293,6 +340,18 @@ that caught a real bug: FRAME's options are `Color / Pants length / Size`, so **
 `option3`** and `option1` is a colour name — a parser assuming `option1` records your jeans size
 as `"Ridgeway"`. Fixtures drift from reality, but live requests in tests mean a suite that fails
 when a store is slow and hammers third parties on every push.
+
+**Currency is cached in a `sync.Map`, not a plain map.** The product endpoint omits currency, so
+it comes from `/meta.json` — a value that is fetched once per store and then read on every poll
+forever. MCP tool handlers run concurrently, so two `check_item` calls can touch that cache at
+the same time. A plain `map` read and written concurrently does not merely return a wrong answer:
+the Go runtime detects it and aborts the process with `fatal error: concurrent map read and map
+write`, which is not recoverable. `sync.Map` locks internally, and its documented sweet spot —
+*written once per key, read many times* — is exactly this access pattern. The cost is a `any`
+value and a type assertion on read, since it predates generics; a `map` behind a `sync.RWMutex`
+would be type-safe but longer. There is a benign cold-cache race: two goroutines can miss and
+both fetch, which costs one duplicate request and stores the same value twice. Closing it needs
+per-key locking or `singleflight`, which is more machinery than a once-per-store fetch deserves.
 
 **The database is local and never leaves the machine.** No server, no account, no telemetry; the
 repo ships the schema, each install grows its own data. The cost is that two machines mean two
@@ -401,6 +460,22 @@ verify, and never claims two listings are definitely the same item.
       programs, seller reputation, and price-anomaly detection against stored history. Advisory
       only — it never declares an item genuine
 
+### Observability
+
+Nothing currently reports on itself. The measured figures in [Resource usage](#resource-usage)
+came from ad-hoc probes, which is fine for a snapshot and useless for noticing that the watcher
+has been failing against one store for a week. Capacity questions the tool should answer about
+itself rather than requiring a benchmark:
+
+- [ ] Structured logging to stderr, levelled, so `watch` leaves a trail worth reading
+- [ ] Request counters per store: attempts, failures, HTTP status distribution, latency
+- [ ] Currency cache hit and miss counts, to confirm the once-per-store assumption holds
+- [ ] Observations written per day, and database size, to keep the storage projection honest
+- [ ] Rate-limit and backoff events, so a store quietly throttling us is visible
+- [ ] Token cost per tool response, to catch a schema change bloating every session
+- [ ] A `stats` subcommand printing all of the above, and a `doctor` that checks whether the
+      schema is current, `watch` is alive, and any API keys still work
+
 ### Smaller follow-ups
 
 - [ ] Purchase tracking and 14-day price-match detection, with a drafted email to customer service
@@ -408,7 +483,6 @@ verify, and never claims two listings are definitely the same item.
 - [ ] Automatic brand → domain resolution: guess `<brand>.com`, verify with `inspect_url`. Tested
       at 3/8 resolved with **zero false positives**; a wrong guess costs one request and falls
       back to manual
-- [ ] `doctor` subcommand — is the schema current, is `watch` alive, do the API keys work
 - [ ] User-invoked `prune` for retention, never automatic
 - [ ] Affiliate feeds (CJ / Rakuten / Impact) for legitimate bulk catalog access
 - [ ] Size normalization across IT / FR / UK / US
