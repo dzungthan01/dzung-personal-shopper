@@ -1,0 +1,9 @@
+# build output
+/bin/
+/dzung-personal-shopper
+
+# local database and config
+*.db
+*.db-wal
+*.db-shm
+.env
