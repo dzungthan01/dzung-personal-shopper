@@ -18,11 +18,26 @@ You talk to it through Claude:
 
 ---
 
-## Status
+## This is an MVP version that can do
 
-MVP. Wishlist storage, automatic price reads from Shopify storefronts, manual entry for
-everything else, and price history all work. Background monitoring and cross-site search are
-designed but not built — see [Future improvements](#future-improvements).
+* **Track a wishlist** — add any product URL, keep it with your size and notes, archive what you
+  no longer want without losing its history
+* **Read prices automatically from any Shopify storefront** — price, sale price, per-size stock,
+  no API key or account required
+* **Track retailers that block automated requests** — Mytheresa, SSENSE and similar are tracked
+  by hand through `record_snapshot`, from a page you or Claude has already loaded
+* **Keep full price history** — every check is appended, never overwritten, so "has this ever
+  been cheaper?" is answerable
+* **Report what changed** — `check_item` re-reads an item and tells you the price moved, by how
+  much, and whether it came back in stock
+* **Tell you if *your* size is in stock**, not just whether the product exists
+* **Detect whether a store is readable before you commit** — `inspect_url` probes a host and says
+  whether prices will update on their own
+
+Not yet built: background monitoring, push notifications, cross-site price comparison. Those are
+designed and specified — see [Roadmap](#roadmap).
+
+### Install
 
 ```bash
 go install github.com/dzungthan01/dzung-personal-shopper/cmd/dzung-personal-shopper@latest
@@ -31,36 +46,32 @@ dzung-personal-shopper migrate     # create the database
 claude mcp add dzung-personal-shopper -- dzung-personal-shopper start
 ```
 
----
-
-## General functionality
-
-Seven tools, exposed over MCP:
+### The seven tools
 
 | Tool | What it does |
 |---|---|
-| `inspect_url` | Reports whether a store can be read automatically, before you commit to adding it |
-| `add_item` | Adds a product, detects the platform, and records the current price if it can |
-| `list_items` | The wishlist with latest price, sale status, and whether *your* size is in stock |
-| `check_item` | Re-reads one item now and reports what changed since last time |
-| `record_snapshot` | Logs a price you read yourself — how blocked retailers get tracked |
+| `inspect_url` | Reports whether a store can be read automatically |
+| `add_item` | Adds a product, detects the platform, records the current price if it can |
+| `list_items` | The wishlist with latest price, sale status, and whether your size is in stock |
+| `check_item` | Re-reads one item now and reports what changed |
+| `record_snapshot` | Logs a price you read yourself |
 | `get_price_history` | Every recorded price, plus lowest and highest ever seen |
 | `archive_item` | Removes an item from the active list, keeping its history |
 
 ### Which stores can be read automatically
 
-Any Shopify storefront, which is a larger set than it sounds. Verified by probing
-`/meta.json` for a `myshopify_domain`:
+Verified by probing each host's `/meta.json` for a `myshopify_domain`.
 
-| Automatic | Manual entry only |
-|---|---|
-| FRAME, Veronica Beard, Khaite, STAUD | Mytheresa, SSENSE, NET-A-PORTER |
-| AGOLDE, MOTHER, Rails, Anine Bing | Aritzia, Sezane, Sephora, lululemon |
-| Cuyana, Universal Standard, Alo Yoga | Reformation, Madewell, Quince |
-| Brooklinen, Parachute, Floyd, Bearaby | The RealReal, Skims, Ganni |
+* **Automatic (Shopify storefronts)** — FRAME, Veronica Beard, Khaite, STAUD, AGOLDE, MOTHER,
+  Rails, Anine Bing, DÔEN, Farm Rio, LoveShackFancy, Totême, Cuyana, Universal Standard,
+  Girlfriend Collective, Marine Layer, Alo Yoga, Outdoor Voices, Brooklinen, Parachute, Floyd,
+  Bearaby
 
-The right-hand column runs custom platforms behind Cloudflare or Akamai. Those are not
-scraped — see [Design decisions](#4-blocked-retailers-are-designed-around-not-scraped).
+* **Manual entry only (custom platforms behind bot protection)** — Mytheresa, SSENSE,
+  NET-A-PORTER, The RealReal, Aritzia, Sezane, Sephora, lululemon, Reformation, Madewell,
+  Quince, Skims, Ganni, Vuori
+
+The second group is not scraped. See [design decision 3](#3-blocked-retailers-are-designed-around-not-scraped).
 
 ---
 
@@ -96,10 +107,6 @@ flowchart TB
     watch["<b>watch</b> (planned)<br/>polls on a timer<br/>no MCP involved"] --> db
 ```
 
-Two processes, one database. That split is the central constraint — see below.
-
-### Layout
-
 ```
 cmd/dzung-personal-shopper/   subcommands: start · migrate · version
 internal/
@@ -121,41 +128,127 @@ import those packages, so their APIs stay free to change.
 
 ### 1. Two processes, one database
 
-An MCP stdio server **only runs while its client runs it**. Quit Claude Code and the server
-dies, so nothing can check prices at 3am.
+`start` serves MCP over stdio; a planned `watch` polls on a timer; they share one SQLite file in
+WAL mode and never talk to each other.
 
-**Tradeoff:** a single always-on daemon would be simpler to reason about, but then Claude would
-have to talk to it over HTTP instead of stdio, adding ports, auth and lifecycle management to a
-personal tool. Instead: `start` serves MCP, `watch` polls on a timer, and they share a SQLite
-file in WAL mode. They never talk to each other. Coordination cost drops to zero at the price of
-one shared file.
+**Pros**
+* An MCP stdio server only lives as long as its client. This is the only way prices can be
+  checked while Claude is closed.
+* Zero coordination code: no IPC, no ports, no message queue, no service discovery.
+* Either process can crash or be restarted without affecting the other.
+* One binary, so there is nothing extra to install or version.
+
+**Cons**
+* Two things to keep running, and `watch` failing silently is possible until a `doctor`
+  subcommand exists.
+* SQLite write contention is real, though WAL makes it a non-issue at this scale.
+* Both processes must resolve the same database path, which is why it is XDG-based rather than
+  relative to the working directory.
+
+**Alternative rejected: one always-on daemon that also serves MCP over HTTP**
+* *Pros:* a single process to supervise; state lives in memory; no shared-file concerns.
+* *Cons:* introduces a listening port, authentication, and TLS decisions to a personal tool that
+  otherwise needs none. Claude Code's stdio transport is the simplest thing that works, and
+  giving it up to avoid one shared file is a bad trade.
+
+**Alternative rejected: cron invoking a one-shot subcommand**
+* *Pros:* no long-lived process at all; the OS handles scheduling.
+* *Cons:* no in-process state, so per-store rate limiting and backoff have to be persisted and
+  reloaded on every run. Debugging a misbehaving cron entry is worse than reading a log.
 
 ### 2. Observations are append-only
 
-Every price check **inserts** a row. Nothing is ever updated.
+Every price check inserts a row. Nothing is ever updated.
 
 ```
 items         one row per thing you want          mutable
 observations  one row per price check             append-only
 ```
 
-**Tradeoff:** storing a single `current_price` column would be smaller and simpler. But then
-"has this ever been cheaper?" is unanswerable, a price drop needs separate bookkeeping to
-detect, and the 14-day price-match window becomes its own subsystem instead of a `WHERE` clause.
+**Pros**
+* Price history is free, and "was it ever cheaper?" becomes a `MIN()` rather than a feature.
+* A price drop is a comparison of the two newest rows — no separate change-tracking table.
+* The 14-day price-match window becomes a `WHERE fetched_at > ...` clause instead of a subsystem.
+* Anomaly detection for the planned trust signals gets a real price distribution for free.
+* Bugs are diagnosable after the fact, because nothing was destroyed.
 
-The cost is disk, and it was measured rather than guessed: **50 items polled daily for a year is
-4.8 MB**, at 261 bytes per row. That is not a real constraint at personal scale, so history wins.
+**Cons**
+* Storage grows without bound.
+* "Current price" is a query, not a column, so every read path joins to the newest observation.
+* No unique constraint stops a redundant identical reading being stored.
 
-### 3. Money is `int64` minor units, never a float
+**Alternative rejected: a mutable `current_price` column on `items`**
+* *Pros:* smaller, simpler, one row per item, trivially indexed.
+* *Cons:* destroys the history that makes the tool worth having. Every feature past "what does it
+  cost right now" — price matching, anomaly detection, judging whether a sale is real — would
+  need its own history table anyway, reinventing this design badly.
 
-`$173.00` is stored as `17300`.
+Storage was measured rather than guessed: **50 items polled daily for a year is 4.8 MB**, at 261
+bytes per row. That is not a real constraint, so history wins.
 
-**Tradeoff:** floats read more naturally in code. They are also wrong — `0.1 + 0.2 != 0.3` — and
-this program's entire purpose is comparing prices. Rounding error in the one value that matters
-is not an acceptable trade for nicer-looking arithmetic.
+### 3. Blocked retailers are designed around, not scraped
 
-This also drove the choice of Shopify endpoint. Of the three available, only one returns both
-stock status *and* integer prices:
+Mytheresa, SSENSE and NET-A-PORTER return `403` to automated requests. `manual.Fetch` performs no
+I/O at all; prices for those stores arrive through `record_snapshot`, read off a page a human or
+Claude already loaded.
+
+**Pros**
+* No terms-of-service violation, and no adversarial relationship with any retailer.
+* Nothing to break when a store changes its bot-protection vendor — there is no scraper to break.
+* No headless browser, no proxy pool, no CAPTCHA solving: the dependency tree and the attack
+  surface both stay small.
+* Those items still get full price history and still answer "is this a good price?"
+* It generalises: any store, anywhere, can be tracked the moment a human can see the page.
+
+**Cons**
+* Prices for those retailers do not update on their own — which is most luxury retail.
+* Data quality depends on whoever typed it in.
+* The workflow requires a human in the loop, which is exactly what the browser extension in the
+  roadmap is meant to fix.
+
+**Alternative rejected: headless browser scraping (Playwright or similar)**
+* *Pros:* full automation for every retailer; no manual step.
+* *Cons:* against those sites' terms; needs a browser binary, so no more single-file
+  `go install`; breaks whenever bot protection changes; and makes the project's central technical
+  achievement "evading detection", which is not a thing worth building a portfolio around.
+
+**Alternative rejected: a third-party scraping API**
+* *Pros:* someone else maintains the evasion; a clean HTTP interface.
+* *Cons:* outsources the terms-of-service problem without solving it, adds per-request cost and a
+  vendor dependency, and puts a paid service on the critical path of a personal tool.
+
+### 4. Source selection happens once per item, not once per poll
+
+The `Source` interface deliberately has **no `CanHandle(url)` method**, though the original design
+did. Detection runs when an item is added, and the answer is stored in `items.source`; after that,
+choosing a fetcher is a map lookup.
+
+**Pros**
+* One `/meta.json` probe per item, ever, instead of one before every fetch.
+* Source selection costs nanoseconds and cannot fail, so no error path in the hot loop.
+* Keeps the tool a well-behaved client, which matters because the whole project depends on
+  unauthenticated endpoints that stores are under no obligation to keep open.
+* The interface stays honest: a method named `CanHandle` should not open a socket.
+
+**Cons**
+* A store migrating platforms leaves stale rows that need re-detecting.
+* The decision is invisible in the database as anything but a string, so a wrong value is a
+  silent misconfiguration until a fetch fails.
+
+**Alternative rejected: `CanHandle(url) bool` on the interface, evaluated per fetch**
+* *Pros:* self-configuring; a platform migration heals itself; no state to go stale.
+* *Cons:* the predicate has to do network I/O to answer. At 50 items polled hourly — 1,200 polls
+  a day — that is **438,000 extra requests a year** to re-answer a question whose answer never
+  changes. Re-detection is a rare manual fix; the request volume would have been permanent.
+
+---
+
+### Smaller decisions
+
+**Money is `int64` minor units, never a float.** `$173.00` is stored as `17300`. Floats read more
+naturally and are also wrong: `0.1 + 0.2 != 0.3`, and this program exists to compare prices. This
+drove the endpoint choice too — of Shopify's three product endpoints, only
+`/products/{handle}.js` returns both stock status *and* integer prices:
 
 | Endpoint | `available` | price format |
 |---|---|---|
@@ -163,75 +256,142 @@ stock status *and* integer prices:
 | `/products/{handle}.json` | **no** | `"173.00"` string |
 | **`/products/{handle}.js`** | **yes** | **`17300` integer** |
 
-### 4. Blocked retailers are designed around, not scraped
+**LLM-shaped work stays on the Claude side.** Tools return structured facts, never prose, and the
+server makes no model calls of its own. Parsing a messy pasted size list is Claude's job before it
+calls `record_snapshot`. The Go code stays deterministic, testable without a model in the loop,
+and free of API keys and latency.
 
-Mytheresa, SSENSE and NET-A-PORTER return `403` to automated requests. Defeating that is against
-their terms, breaks constantly, and would make the codebase's central feature an arms race.
+**Pure-Go SQLite** (`modernc.org/sqlite`, not the faster cgo `mattn/go-sqlite3`). Measurably
+slower, but needs no C toolchain, cross-compiles trivially, and lets `go install` produce one
+self-contained binary with migrations embedded. For dozens of queries a day, startup simplicity
+beats throughput.
 
-**Tradeoff:** convenience. Those prices do not update on their own. In exchange, `record_snapshot`
-accepts a price read off a page you or Claude already loaded, so those items are still tracked,
-still get price history, and still answer "is this a good price?" — with no fragile scraping
-anywhere in the codebase. `manual.Fetch` performs no I/O at all; that is the point.
+**Tests never touch the network.** Every HTTP interaction runs against `httptest` servers with
+recorded payloads. The Shopify fixture is trimmed from a real FRAME response, including the case
+that caught a real bug: FRAME's options are `Color / Pants length / Size`, so **size is
+`option3`** and `option1` is a colour name — a parser assuming `option1` records your jeans size
+as `"Ridgeway"`. Fixtures drift from reality, but live requests in tests mean a suite that fails
+when a store is slow and hammers third parties on every push.
 
-### 5. Source selection happens once per item, not once per poll
-
-The `Source` interface deliberately has **no `CanHandle(url)` method**, though the original design
-did. Answering "is this host Shopify?" requires a network call, so a supposedly cheap predicate
-would do I/O on every fetch, forever.
-
-Detection runs once, when the item is added, and the answer is stored in `items.source`.
-
-**Tradeoff:** if a store migrates platforms, its items need re-detecting. Against that: 50 items
-polled hourly is 1,200 polls a day, so a per-poll probe would mean **438,000 extra requests a year**
-to re-answer a question whose answer never changes. Re-detection is a rare manual fix; the
-request volume was permanent.
-
-### 6. LLM-shaped work stays on the Claude side
-
-Tools return **structured facts**, never prose the model has to re-parse, and the server makes no
-LLM calls of its own.
-
-**Tradeoff:** the server cannot handle messy input by itself — parsing a pasted list of sizes is
-Claude's job before calling `record_snapshot`. In return the Go code stays deterministic, unit
-testable without a model in the loop, and free of API keys and latency.
-
-### 7. Pure-Go SQLite
-
-`modernc.org/sqlite` rather than the faster cgo-based `mattn/go-sqlite3`.
-
-**Tradeoff:** measurably slower. Also: no C toolchain, trivial cross-compilation, and
-`go install` produces one self-contained binary with the migrations embedded. For a personal
-tool doing dozens of queries a day, startup simplicity beats throughput.
-
-### 8. Tests never touch the network
-
-Every HTTP interaction is tested against `httptest` servers with recorded payloads. The Shopify
-fixture is trimmed from a real FRAME response, including the case that exposed a real bug: FRAME's
-options are `Color / Pants length / Size`, so **size is `option3`** and `option1` is a colour name.
-A parser assuming `option1` records your jeans size as `"Ridgeway"`.
-
-**Tradeoff:** fixtures drift from reality, and a store changing its API shape will not fail CI.
-The alternative — live requests in tests — means a flaky suite that fails when a store is slow
-and hammers third parties on every push. Fixtures win; drift is caught by using the tool.
+**The database is local and never leaves the machine.** No server, no account, no telemetry; the
+repo ships the schema, each install grows its own data. The cost is that two machines mean two
+independent wishlists — syncing is the wall the browser extension will eventually hit.
 
 ---
 
-## Future improvements
+## Resource usage
 
-- [ ] **Background watcher** — `watch` subcommand polling on a timer, with jitter and per-store rate limits
-- [ ] **Diff engine** — price drop, restock, and your-size-back detection
-- [ ] **Push notifications** — ntfy.sh by default, behind a `Notifier` interface
-- [ ] **Idempotent alerting** — dedupe keys so a flapping price does not send forty pings
-- [ ] **Cross-site search** — find the same item elsewhere, ranked, for the human to verify
-- [ ] **Listing trust signals** — rank matches by value rather than raw price, using platform authentication programs, seller reputation, and price-anomaly detection against stored history. Advisory only; never declares an item genuine
-- [ ] **Automatic brand → domain resolution** — guess `<brand>.com`, verify with `inspect_url`. Tested at 3/8 resolved with **zero false positives**; a wrong guess costs one request and falls back to manual
-- [ ] **Browser extension** — add to wishlist while browsing. Defeats bot protection without fighting it: the page is already rendered in an authenticated session. Posts the same `Snapshot` the manual source already accepts
-- [ ] **Purchase tracking and price matching** — 14-day window detection, and drafting the email to customer service
-- [ ] **Membership perks** — import discount codes and stored-value cards, match them against wishlist items
-- [ ] **Retention** — user-invoked `prune`, never automatic
-- [ ] **Affiliate feeds** — CJ / Rakuten / Impact for legitimate bulk catalog access to blocked retailers
-- [ ] **Size normalization** across IT / FR / UK / US
-- [ ] **Multi-currency** — pin a region per item so EUR/USD switching is not read as a price drop
+Measured, not estimated.
+
+### Storage
+
+| | |
+|---|---|
+| Per observation | **261 bytes** |
+| 25 items, 1 reading each | 61 KB |
+| 50 items polled daily, 1 year | **4.8 MB** |
+| 50 items polled hourly, 1 year | ~114 MB |
+
+Nothing here is a constraint at personal scale. Retention is deliberately not implemented; the
+history is worth more than the disk.
+
+### Requests to store APIs
+
+Currently on-demand only, so the floor is what you ask for:
+
+| Action | Requests |
+|---|---|
+| `add_item`, first item from a store | 2 (`/meta.json` + product) |
+| `add_item`, later items from the same store | 1 (currency is cached per host) |
+| `check_item` | 1 |
+
+With the planned watcher, for 50 items:
+
+| Poll interval | Requests/year | Per store, per hour (10 stores) |
+|---|---|---|
+| Hourly | 438,000 | 5 |
+| Every 6 hours | 73,000 | <1 |
+| Daily | **18,250** | <1 |
+
+Daily is the intended default. Prices in fashion retail change on markdown cycles, not minutes,
+and a personal tool has no business making five requests an hour to a store that owes it nothing.
+
+### Token cost
+
+The MCP layer's cost to the model's context, measured against a live server:
+
+| | Chars | ~Tokens |
+|---|---|---|
+| Tool schemas, sent once per session | 8,821 | **~2,205** |
+| `list_items` with 25 items | 7,920 | **~1,980** |
+| Per wishlist item in that response | 316 | ~79 |
+
+The ~2,200-token schema cost is fixed and paid on every session, which is a direct argument
+against adding tools nobody uses. The per-item cost is why `list_items` returns the latest
+reading rather than full history, and why `get_price_history` is a separate call.
+
+### Planned: search API budget
+
+Cross-site search will use [Tavily](https://tavily.com) (1,000 credits/month free, no card).
+Thirty items re-searched weekly is ~120 queries/month — about 12% of the free tier. Volume is not
+the constraint; match quality is.
+
+---
+
+## Roadmap
+
+### Major features
+
+**1. Browser extension for wishlist capture** — the biggest single upgrade.
+
+An "add to wishlist" button on any product page, writing straight to the database. It defeats bot
+protection without fighting it: the page is already rendered, in a real browser, in an
+authenticated session, so Mytheresa and SSENSE hand over the price and size availability that a
+server-side fetch gets a `403` for. It needs no new backend — the extension posts the same
+`Snapshot` the manual source already accepts, to a local endpoint `watch` can host. And it
+captures the moment of intent, which is when wishlists actually get filled.
+
+- [ ] Local HTTP endpoint hosted by `watch`
+- [ ] Extension with per-site content scripts, falling back to schema.org `Product` markup
+- [ ] One-click add with size selection
+
+**2. Background monitoring and notifications** — makes the tool work while you are not looking.
+
+The `watch` process, the diff engine that decides what counts as news, and the push that reaches
+your phone. This is the feature that turns a database into something useful: a price drop at 3am
+is worth knowing about at 7am, not whenever you next think to ask.
+
+- [ ] `watch` subcommand polling on a timer, with jitter and per-store rate limits
+- [ ] Diff engine: price drop, restock, your-size-back
+- [ ] Push notifications via ntfy.sh, behind a `Notifier` interface
+- [ ] Idempotent alerting with dedupe keys, so a flapping price does not send forty pings
+- [ ] `launchd` plist so it survives reboots
+
+**3. Cross-site price comparison** — find the same item cheaper somewhere else.
+
+Search for a wishlist item by brand and title across other retailers and resale platforms, and
+return ranked candidates with prices. Scoped deliberately: it surfaces links for a human to
+verify, and never claims two listings are definitely the same item.
+
+- [ ] `SearchProvider` interface with a Tavily implementation
+- [ ] Title and brand normalization, scoring, confidence
+- [ ] `find_elsewhere` tool writing to the `matches` table
+- [ ] Trust signals so ranking can be by value rather than raw price: platform authentication
+      programs, seller reputation, and price-anomaly detection against stored history. Advisory
+      only — it never declares an item genuine
+
+### Smaller follow-ups
+
+- [ ] Purchase tracking and 14-day price-match detection, with a drafted email to customer service
+- [ ] Membership perks — import discount codes and stored-value cards, match against wishlist items
+- [ ] Automatic brand → domain resolution: guess `<brand>.com`, verify with `inspect_url`. Tested
+      at 3/8 resolved with **zero false positives**; a wrong guess costs one request and falls
+      back to manual
+- [ ] `doctor` subcommand — is the schema current, is `watch` alive, do the API keys work
+- [ ] User-invoked `prune` for retention, never automatic
+- [ ] Affiliate feeds (CJ / Rakuten / Impact) for legitimate bulk catalog access
+- [ ] Size normalization across IT / FR / UK / US
+- [ ] Multi-currency: pin a region per item so EUR/USD switching is not read as a price drop
 
 ## What this deliberately does not do
 
@@ -245,7 +405,7 @@ and hammers third parties on every push. Fixtures win; drift is caught by using 
 ```bash
 go build ./...
 go vet ./...
-go test ./...
+go test ./... -race -cover
 
 npx @modelcontextprotocol/inspector ~/go/bin/dzung-personal-shopper start
 ```
