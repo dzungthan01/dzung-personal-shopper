@@ -146,15 +146,36 @@ WAL mode and never talk to each other.
   relative to the working directory.
 
 **Alternative rejected: one always-on daemon that also serves MCP over HTTP**
+
+A *daemon* is a program that runs continuously in the background with no terminal, started at
+boot by `launchd` or `systemd`. Here it would poll prices and also listen on a local port for
+Claude, instead of being launched on demand over stdio.
+
 * *Pros:* a single process to supervise; state lives in memory; no shared-file concerns.
 * *Cons:* introduces a listening port, authentication, and TLS decisions to a personal tool that
   otherwise needs none. Claude Code's stdio transport is the simplest thing that works, and
   giving it up to avoid one shared file is a bad trade.
 
 **Alternative rejected: cron invoking a one-shot subcommand**
+
+*Cron* is the OS scheduler: it launches a command on a schedule, lets it finish, and keeps
+nothing running in between.
+
 * *Pros:* no long-lived process at all; the OS handles scheduling.
-* *Cons:* no in-process state, so per-store rate limiting and backoff have to be persisted and
-  reloaded on every run. Debugging a misbehaving cron entry is worse than reading a log.
+* *Cons:* the program forgets everything between runs, and polite polling needs memory — "I hit
+  this store two seconds ago", "this store returned a 429, back off" — so rate limiting and
+  backoff have to be persisted and reloaded every run, badly reimplementing what a long-lived
+  process gets for free. Cron also fails quietly: a minimal environment, no output by default,
+  and the classic discovery three weeks later that it never ran.
+
+|  | Scheduling state | Setup cost | Fails visibly? |
+|---|---|---|---|
+| **A: two processes** | in memory, free | one launchd plist | yes, it is a live process you can inspect |
+| **B: one daemon** | in memory, free | port + auth + TLS decisions | yes |
+| **C: cron** | must persist and reload | one crontab line | notoriously not |
+
+A gets B's in-memory state without B's networking, and avoids C's silent failures. The price is
+one shared SQLite file, which the watcher needs regardless of which option is chosen.
 
 ### 2. Observations are append-only
 

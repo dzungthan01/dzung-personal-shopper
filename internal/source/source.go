@@ -29,9 +29,6 @@ type Source interface {
 	Fetch(ctx context.Context, rawURL string) (*model.Snapshot, error)
 }
 
-// Registry looks up a Source by name. Which Source handles an item is decided
-// once, when the item is added, and stored on the item; that avoids re-probing
-// the store on every fetch.
 type Registry struct {
 	sources map[string]Source
 }
