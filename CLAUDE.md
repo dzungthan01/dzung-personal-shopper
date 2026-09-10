@@ -20,7 +20,7 @@ watches for price drops and restocks. See PLAN.md for design and roadmap.
 ```bash
 go build ./... && go vet ./... && go test ./...
 go install ./cmd/dzung-personal-shopper
-npx @modelcontextprotocol/inspector ~/go/bin/dzung-personal-shopper serve
+npx @modelcontextprotocol/inspector ~/go/bin/dzung-personal-shopper start
 ```
 
 ## Constraints

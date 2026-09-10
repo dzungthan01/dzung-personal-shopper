@@ -463,30 +463,32 @@ the constraint; match quality is.
 
 ### Major features
 
-**1. Browser extension for wishlist capture** — the biggest single upgrade.
-
-An "add to wishlist" button on any product page, writing straight to the database. It defeats bot
-protection without fighting it: the page is already rendered, in a real browser, in an
-authenticated session, so Mytheresa and SSENSE hand over the price and size availability that a
-server-side fetch gets a `403` for. It needs no new backend — the extension posts the same
-`Snapshot` the manual source already accepts, to a local endpoint `watch` can host. And it
-captures the moment of intent, which is when wishlists actually get filled.
-
-- [ ] Local HTTP endpoint hosted by `watch`
-- [ ] Extension with per-site content scripts, falling back to schema.org `Product` markup
-- [ ] One-click add with size selection
-
-**2. Background monitoring and notifications** — makes the tool work while you are not looking.
+**1. Background monitoring and notifications** — makes the tool work while you are not looking.
 
 The `watch` process, the diff engine that decides what counts as news, and the push that reaches
 your phone. This is the feature that turns a database into something useful: a price drop at 3am
-is worth knowing about at 7am, not whenever you next think to ask.
+is worth knowing about at 7am, not whenever you next think to ask. It also comes first because it
+is the always-on process the browser extension will post to.
 
 - [ ] `watch` subcommand polling on a timer, with jitter and per-store rate limits
 - [ ] Diff engine: price drop, restock, your-size-back
 - [ ] Push notifications via ntfy.sh, behind a `Notifier` interface
 - [ ] Idempotent alerting with dedupe keys, so a flapping price does not send forty pings
 - [ ] `launchd` plist so it survives reboots
+
+**2. Browser extension for wishlist capture** — the biggest single change to how the tool is used.
+
+An "add to wishlist" button on any product page, writing straight to the database. It defeats bot
+protection without fighting it: the page is already rendered, in a real browser, in an
+authenticated session, so Mytheresa and SSENSE hand over the price and size availability that a
+server-side fetch gets a `403` for. It needs no new backend — the extension posts the same
+`Snapshot` the manual source already accepts, to a local endpoint hosted by `watch`, which is why
+it follows the watcher rather than leading. And it captures the moment of intent, which is when
+wishlists actually get filled.
+
+- [ ] Local HTTP endpoint hosted by `watch`
+- [ ] Extension with per-site content scripts, falling back to schema.org `Product` markup
+- [ ] One-click add with size selection
 
 **3. Cross-site price comparison** — find the same item cheaper somewhere else.
 
