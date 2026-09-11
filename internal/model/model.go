@@ -92,3 +92,51 @@ func (s Snapshot) HasSize(size string) bool {
 	}
 	return false
 }
+
+// AlertKind is what happened. Values are stored verbatim in alerts.kind.
+type AlertKind string
+
+const (
+	AlertPriceDrop   AlertKind = "price_drop"
+	AlertSaleStarted AlertKind = "sale_started"
+	AlertBackInStock AlertKind = "back_in_stock"
+	AlertMySizeBack  AlertKind = "my_size_back"
+)
+
+// Alert is one thing worth telling the user about.
+type Alert struct {
+	ID     int64
+	ItemID int64
+	Kind   AlertKind
+
+	// DedupeKey caps repeats at one alert per item, kind, value and day.
+	// The rules package builds it; the store enforces uniqueness.
+	DedupeKey string
+
+	Payload    AlertPayload
+	CreatedAt  time.Time
+	NotifiedAt *time.Time // nil until the push has gone out
+	ReadAt     *time.Time // nil until acknowledged
+}
+
+// Notified reports whether the push has already been sent.
+func (a Alert) Notified() bool { return a.NotifiedAt != nil }
+
+// AlertPayload carries the detail a notification message is built from.
+type AlertPayload struct {
+	Title         string `json:"title,omitempty"`
+	URL           string `json:"url,omitempty"`
+	Currency      string `json:"currency,omitempty"`
+	Size          string `json:"size,omitempty"`
+	PriceCents    int64  `json:"price_cents,omitempty"`
+	PreviousCents int64  `json:"previous_cents,omitempty"`
+	CompareCents  int64  `json:"compare_cents,omitempty"`
+}
+
+// DropCents is how much the price fell, or 0 if it did not.
+func (p AlertPayload) DropCents() int64 {
+	if p.PreviousCents > p.PriceCents {
+		return p.PreviousCents - p.PriceCents
+	}
+	return 0
+}

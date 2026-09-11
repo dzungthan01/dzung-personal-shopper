@@ -57,5 +57,11 @@ Comments — one or two lines. Say what is non-obvious, then stop.
 // memory just to reject it.
 ```
 
+Tests — testify. `require` for preconditions that make the rest of the test
+meaningless (errors, a length check before indexing); `assert` for the checks
+themselves. Prefer `assert.Equal` over `assert.True`: it prints expected and
+actual. Never discard an error with `_` in a test — `len(x) == 0` then passes
+on a failed query.
+
 Examples in docs and tests use mid-range brands (Everlane, Cuyana, Girlfriend
 Collective), not luxury ones.
