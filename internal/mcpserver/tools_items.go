@@ -19,25 +19,27 @@ import (
 )
 
 type addItemInput struct {
-	URL    string `json:"url" jsonschema:"the product page URL to track"`
-	MySize string `json:"my_size,omitempty" jsonschema:"the size you want, exactly as the store writes it, e.g. 28 or M"`
-	Title  string `json:"title,omitempty" jsonschema:"a title for the item; only used when the store cannot be read automatically"`
-	Notes  string `json:"notes,omitempty" jsonschema:"free-text note to yourself about this item"`
+	URL     string `json:"url" jsonschema:"the product page URL to track"`
+	Variant string `json:"variant,omitempty" jsonschema:"the colour and/or size wanted, as the store names it, e.g. Light Pistachio / M, or just M. Leave empty to track any variant"`
+	Title   string `json:"title,omitempty" jsonschema:"a title for the item; only used when the store cannot be read automatically"`
+	Notes   string `json:"notes,omitempty" jsonschema:"free-text note to yourself about this item"`
 }
 
 type addItemOutput struct {
-	ItemID         int64    `json:"item_id" jsonschema:"database id, used by the other tools"`
-	Title          string   `json:"title"`
-	Brand          string   `json:"brand,omitempty"`
-	Source         string   `json:"source" jsonschema:"shopify if prices update automatically, manual if they must be recorded by hand"`
-	AutoTracked    bool     `json:"auto_tracked" jsonschema:"true when prices can be refreshed without help"`
-	PriceCents     int64    `json:"price_cents,omitempty" jsonschema:"current price in minor units, e.g. 17300 means $173.00"`
-	CompareCents   int64    `json:"compare_cents,omitempty" jsonschema:"the pre-sale price, when the item is discounted"`
-	Currency       string   `json:"currency,omitempty"`
-	Available      bool     `json:"available,omitempty"`
-	AvailableSizes []string `json:"available_sizes,omitempty"`
-	AlreadyTracked bool     `json:"already_tracked,omitempty" jsonschema:"true if this URL was already on the wishlist"`
-	Message        string   `json:"message" jsonschema:"one line summarising what happened, safe to relay to the user"`
+	ItemID            int64    `json:"item_id" jsonschema:"database id, used by the other tools"`
+	Title             string   `json:"title"`
+	Brand             string   `json:"brand,omitempty"`
+	Source            string   `json:"source" jsonschema:"shopify if prices update automatically, manual if they must be recorded by hand"`
+	AutoTracked       bool     `json:"auto_tracked" jsonschema:"true when prices can be refreshed without help"`
+	PriceCents        int64    `json:"price_cents,omitempty" jsonschema:"current price in minor units, e.g. 17300 means $173.00"`
+	CompareCents      int64    `json:"compare_cents,omitempty" jsonschema:"the pre-sale price, when the item is discounted"`
+	Currency          string   `json:"currency,omitempty"`
+	Available         bool     `json:"available,omitempty"`
+	Variant           string   `json:"variant,omitempty" jsonschema:"the variant being tracked, as the store names it"`
+	VariantInStock    *bool    `json:"variant_in_stock,omitempty" jsonschema:"whether the tracked variant is available; null when tracking any variant"`
+	AvailableVariants []string `json:"available_variants,omitempty"`
+	AlreadyTracked    bool     `json:"already_tracked,omitempty" jsonschema:"true if this URL and variant were already on the wishlist"`
+	Message           string   `json:"message" jsonschema:"one line summarising what happened, safe to relay to the user"`
 }
 
 func registerAddItem(server *mcp.Server, dependencies Dependencies) {
@@ -46,25 +48,18 @@ func registerAddItem(server *mcp.Server, dependencies Dependencies) {
 		Description: "Add a product to the wishlist. Detects whether the store can be read " +
 			"automatically; if so, records the current price immediately. If the store cannot be " +
 			"read (most luxury retailers block automated requests), the item is still tracked but " +
-			"prices must be supplied with record_snapshot.",
+			"prices must be supplied with record_snapshot. To track one product in several sizes or " +
+			"colours, add it once per variant.",
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input addItemInput) (*mcp.CallToolResult, addItemOutput, error) {
 		if strings.TrimSpace(input.URL) == "" {
 			return nil, addItemOutput{}, errors.New("url is required")
 		}
 
-		if existing, err := dependencies.Store.ItemByURL(ctx, input.URL); err == nil {
-			return nil, addItemOutput{
-				ItemID: existing.ID, Title: existing.Title, Source: existing.Source,
-				AutoTracked: existing.Source != manual.Name, AlreadyTracked: true,
-				Message: fmt.Sprintf("Already tracking %q as item %d.", existing.Title, existing.ID),
-			}, nil
-		} else if !errors.Is(err, store.ErrNotFound) {
-			return nil, addItemOutput{}, err
-		}
+		productURL := strings.TrimSpace(input.URL)
 
-		detected, err := dependencies.Detector.Inspect(ctx, input.URL)
+		detected, err := dependencies.Detector.Inspect(ctx, productURL)
 		if err != nil {
-			return nil, addItemOutput{}, fmt.Errorf("inspect %q: %w", input.URL, err)
+			return nil, addItemOutput{}, fmt.Errorf("inspect %q: %w", productURL, err)
 		}
 
 		sourceName := manual.Name
@@ -78,24 +73,44 @@ func registerAddItem(server *mcp.Server, dependencies Dependencies) {
 
 		// A manual source returns ErrManualOnly rather than a snapshot; that is
 		// an expected outcome, not a failure.
-		snapshot, err := productSource.Fetch(ctx, input.URL)
+		snapshot, err := productSource.Fetch(ctx, productURL)
 		if err != nil && !errors.Is(err, source.ErrManualOnly) {
-			return nil, addItemOutput{}, fmt.Errorf("fetch %q: %w", input.URL, err)
+			return nil, addItemOutput{}, fmt.Errorf("fetch %q: %w", productURL, err)
+		}
+
+		// Checking needs the store's variant list, so it happens after the fetch.
+		// An unknown variant is an error that names the real options, so the
+		// caller can retry rather than track something that can never restock.
+		variant := strings.TrimSpace(input.Variant)
+		if snapshot != nil {
+			if variant, err = snapshot.ResolveVariant(input.Variant); err != nil {
+				return nil, addItemOutput{}, err
+			}
+		}
+
+		if existing, err := dependencies.Store.ItemByURLAndVariant(ctx, productURL, variant); err == nil {
+			return nil, addItemOutput{
+				ItemID: existing.ID, Title: existing.Title, Source: existing.Source, Variant: existing.Variant,
+				AutoTracked: existing.Source != manual.Name, AlreadyTracked: true,
+				Message: fmt.Sprintf("Already tracking %s as item %d.", describe(existing.Title, existing.Variant), existing.ID),
+			}, nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return nil, addItemOutput{}, err
 		}
 
 		item := &model.Item{
-			URL:    input.URL,
-			Source: sourceName,
-			Title:  input.Title,
-			MySize: input.MySize,
-			Notes:  input.Notes,
+			URL:     productURL,
+			Source:  sourceName,
+			Title:   input.Title,
+			Variant: variant,
+			Notes:   input.Notes,
 		}
 		if snapshot != nil {
 			item.Title = snapshot.Title
 			item.ImageURL = snapshot.ImageURL
 		}
 		if item.Title == "" {
-			item.Title = titleFromURL(input.URL)
+			item.Title = titleFromURL(productURL)
 		}
 
 		brandName := detected.ShopName
@@ -122,13 +137,13 @@ func registerAddItem(server *mcp.Server, dependencies Dependencies) {
 
 		output := addItemOutput{
 			ItemID: item.ID, Title: item.Title, Brand: brandName,
-			Source: sourceName, AutoTracked: sourceName != manual.Name,
+			Source: sourceName, AutoTracked: sourceName != manual.Name, Variant: variant,
 		}
 
 		if snapshot == nil {
 			output.Message = fmt.Sprintf(
-				"Added %q as item %d. %s cannot be read automatically, so use record_snapshot to log its price.",
-				item.Title, item.ID, detected.Host)
+				"Added %s as item %d. %s cannot be read automatically, so use record_snapshot to log its price.",
+				describe(item.Title, item.Variant), item.ID, detected.Host)
 			return nil, output, nil
 		}
 
@@ -140,9 +155,13 @@ func registerAddItem(server *mcp.Server, dependencies Dependencies) {
 		output.CompareCents = snapshot.CompareCents
 		output.Currency = snapshot.Currency
 		output.Available = snapshot.Available
-		output.AvailableSizes = snapshot.AvailableSizes()
-		output.Message = fmt.Sprintf("Added %q as item %d at %s.",
-			item.Title, item.ID, formatMoney(snapshot.PriceCents, snapshot.Currency))
+		output.AvailableVariants = snapshot.AvailableVariants()
+		if variant != "" {
+			inStock := model.VariantInStock(snapshot.Variants, variant)
+			output.VariantInStock = &inStock
+		}
+		output.Message = fmt.Sprintf("Added %s as item %d at %s.",
+			describe(item.Title, item.Variant), item.ID, formatMoney(snapshot.PriceCents, snapshot.Currency))
 		return nil, output, nil
 	})
 }
@@ -152,19 +171,19 @@ type listItemsInput struct {
 }
 
 type wishlistEntry struct {
-	ItemID        int64  `json:"item_id"`
-	Title         string `json:"title"`
-	URL           string `json:"url"`
-	Source        string `json:"source"`
-	MySize        string `json:"my_size,omitempty"`
-	PriceCents    int64  `json:"price_cents,omitempty"`
-	CompareCents  int64  `json:"compare_cents,omitempty"`
-	Currency      string `json:"currency,omitempty"`
-	OnSale        bool   `json:"on_sale,omitempty"`
-	Available     bool   `json:"available,omitempty"`
-	MySizeInStock *bool  `json:"my_size_in_stock,omitempty" jsonschema:"null when no size was specified"`
-	LastCheckedAt string `json:"last_checked_at,omitempty" jsonschema:"RFC3339, empty when never checked"`
-	Archived      bool   `json:"archived,omitempty"`
+	ItemID         int64  `json:"item_id"`
+	Title          string `json:"title"`
+	URL            string `json:"url"`
+	Source         string `json:"source"`
+	Variant        string `json:"variant,omitempty"`
+	PriceCents     int64  `json:"price_cents,omitempty"`
+	CompareCents   int64  `json:"compare_cents,omitempty"`
+	Currency       string `json:"currency,omitempty"`
+	OnSale         bool   `json:"on_sale,omitempty"`
+	Available      bool   `json:"available,omitempty"`
+	VariantInStock *bool  `json:"variant_in_stock,omitempty" jsonschema:"null when tracking any variant"`
+	LastCheckedAt  string `json:"last_checked_at,omitempty" jsonschema:"RFC3339, empty when never checked"`
+	Archived       bool   `json:"archived,omitempty"`
 }
 
 type listItemsOutput struct {
@@ -187,7 +206,7 @@ func registerListItems(server *mcp.Server, dependencies Dependencies) {
 		for _, item := range items {
 			entry := wishlistEntry{
 				ItemID: item.ID, Title: item.Title, URL: item.URL,
-				Source: item.Source, MySize: item.MySize, Archived: item.Archived(),
+				Source: item.Source, Variant: item.Variant, Archived: item.Archived(),
 			}
 
 			latest, err := dependencies.Store.LatestObservation(ctx, item.ID)
@@ -203,9 +222,9 @@ func registerListItems(server *mcp.Server, dependencies Dependencies) {
 				if latest.CompareCents != nil {
 					entry.CompareCents = *latest.CompareCents
 				}
-				if item.MySize != "" {
-					inStock := sizeInStock(latest.Variants, item.MySize)
-					entry.MySizeInStock = &inStock
+				if item.Variant != "" {
+					inStock := model.VariantInStock(latest.Variants, item.Variant)
+					entry.VariantInStock = &inStock
 				}
 			}
 			output.Items = append(output.Items, entry)
@@ -265,4 +284,12 @@ func titleFromURL(rawURL string) string {
 		return parsed.Host
 	}
 	return strings.TrimSpace(strings.ReplaceAll(last, "-", " "))
+}
+
+// describe names an item for messages: "Coleta Sweater" or "Coleta Sweater (M)".
+func describe(title, variant string) string {
+	if variant == "" {
+		return fmt.Sprintf("%q", title)
+	}
+	return fmt.Sprintf("%q (%s)", title, variant)
 }

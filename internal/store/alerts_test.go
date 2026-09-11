@@ -30,7 +30,7 @@ func seedItem(t *testing.T, store *Store) *model.Item {
 	t.Helper()
 	item := &model.Item{
 		URL: "https://cuyana.com/products/classic-easy-tote", Source: "shopify",
-		Title: "Classic Easy Tote", MySize: "M",
+		Title: "Classic Easy Tote", Variant: "M",
 	}
 	_, err := store.AddItem(context.Background(), item)
 	require.NoError(t, err)
@@ -85,17 +85,17 @@ func TestAlertPayloadRoundTrips(t *testing.T) {
 
 	want := model.AlertPayload{
 		Title: "Classic Easy Tote", URL: "https://cuyana.com/products/classic-easy-tote",
-		Currency: "USD", Size: "M", PriceCents: 17300, PreviousCents: 24800, CompareCents: 24800,
+		Currency: "USD", Variant: "M", PriceCents: 17300, PreviousCents: 24800, CompareCents: 24800,
 	}
 	_, _, err := store.AddAlert(context.Background(), &model.Alert{
-		ItemID: item.ID, Kind: model.AlertMySizeBack, DedupeKey: "k1", Payload: want,
+		ItemID: item.ID, Kind: model.AlertVariantBack, DedupeKey: "k1", Payload: want,
 	})
 	require.NoError(t, err)
 
 	alerts := listAlerts(t, store, false)
 	require.Len(t, alerts, 1)
 	assert.Equal(t, want, alerts[0].Payload)
-	assert.Equal(t, model.AlertMySizeBack, alerts[0].Kind)
+	assert.Equal(t, model.AlertVariantBack, alerts[0].Kind)
 	assert.Equal(t, int64(7500), alerts[0].Payload.DropCents())
 }
 

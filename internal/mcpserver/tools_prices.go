@@ -21,18 +21,18 @@ type checkItemInput struct {
 }
 
 type checkItemOutput struct {
-	ItemID         int64    `json:"item_id"`
-	Title          string   `json:"title"`
-	PriceCents     int64    `json:"price_cents"`
-	PreviousCents  int64    `json:"previous_cents,omitempty" jsonschema:"price at the last check, absent on the first"`
-	ChangeCents    int64    `json:"change_cents,omitempty" jsonschema:"negative means the price dropped"`
-	Currency       string   `json:"currency"`
-	OnSale         bool     `json:"on_sale"`
-	Available      bool     `json:"available"`
-	AvailableSizes []string `json:"available_sizes,omitempty"`
-	MySizeInStock  *bool    `json:"my_size_in_stock,omitempty"`
-	BackInStock    bool     `json:"back_in_stock,omitempty" jsonschema:"true when it was unavailable at the last check"`
-	Message        string   `json:"message"`
+	ItemID            int64    `json:"item_id"`
+	Title             string   `json:"title"`
+	PriceCents        int64    `json:"price_cents"`
+	PreviousCents     int64    `json:"previous_cents,omitempty" jsonschema:"price at the last check, absent on the first"`
+	ChangeCents       int64    `json:"change_cents,omitempty" jsonschema:"negative means the price dropped"`
+	Currency          string   `json:"currency"`
+	OnSale            bool     `json:"on_sale"`
+	Available         bool     `json:"available"`
+	AvailableVariants []string `json:"available_variants,omitempty"`
+	VariantInStock    *bool    `json:"variant_in_stock,omitempty" jsonschema:"null when tracking any variant"`
+	BackInStock       bool     `json:"back_in_stock,omitempty" jsonschema:"true when it was unavailable at the last check"`
+	Message           string   `json:"message"`
 }
 
 func registerCheckItem(server *mcp.Server, dependencies Dependencies) {
@@ -74,11 +74,11 @@ func registerCheckItem(server *mcp.Server, dependencies Dependencies) {
 			ItemID: item.ID, Title: item.Title,
 			PriceCents: snapshot.PriceCents, Currency: snapshot.Currency,
 			OnSale:    snapshot.CompareCents > snapshot.PriceCents,
-			Available: snapshot.Available, AvailableSizes: snapshot.AvailableSizes(),
+			Available: snapshot.Available, AvailableVariants: snapshot.AvailableVariants(),
 		}
-		if item.MySize != "" {
-			inStock := snapshot.HasSize(item.MySize)
-			output.MySizeInStock = &inStock
+		if item.Variant != "" {
+			inStock := model.VariantInStock(snapshot.Variants, item.Variant)
+			output.VariantInStock = &inStock
 		}
 
 		if previous == nil {
@@ -112,12 +112,12 @@ func registerCheckItem(server *mcp.Server, dependencies Dependencies) {
 }
 
 type recordSnapshotInput struct {
-	ItemID         int64    `json:"item_id" jsonschema:"the id returned by add_item or list_items"`
-	PriceCents     int64    `json:"price_cents" jsonschema:"price in minor units: $173.00 is 17300"`
-	Currency       string   `json:"currency" jsonschema:"ISO code, e.g. USD"`
-	CompareCents   int64    `json:"compare_cents,omitempty" jsonschema:"the crossed-out original price, when shown"`
-	Available      bool     `json:"available" jsonschema:"whether the item is purchasable at all"`
-	AvailableSizes []string `json:"available_sizes,omitempty" jsonschema:"sizes shown as in stock, exactly as the store writes them"`
+	ItemID            int64    `json:"item_id" jsonschema:"the id returned by add_item or list_items"`
+	PriceCents        int64    `json:"price_cents" jsonschema:"price in minor units: $173.00 is 17300"`
+	Currency          string   `json:"currency" jsonschema:"ISO code, e.g. USD"`
+	CompareCents      int64    `json:"compare_cents,omitempty" jsonschema:"the crossed-out original price, when shown"`
+	Available         bool     `json:"available" jsonschema:"whether the item is purchasable at all"`
+	AvailableVariants []string `json:"available_variants,omitempty" jsonschema:"variants shown as in stock. For the item's own variant, use the name list_items shows for it. A missing region is fine (38 matches IT 38) but other spellings may not match"`
 }
 
 type recordSnapshotOutput struct {
@@ -159,9 +159,9 @@ func registerRecordSnapshot(server *mcp.Server, dependencies Dependencies) {
 			compare := input.CompareCents
 			observation.CompareCents = &compare
 		}
-		for _, size := range input.AvailableSizes {
+		for _, name := range input.AvailableVariants {
 			observation.Variants = append(observation.Variants, model.Variant{
-				Size: size, Available: true, PriceCents: input.PriceCents,
+				Name: name, Available: true, PriceCents: input.PriceCents,
 			})
 		}
 
@@ -256,16 +256,6 @@ func observationFrom(itemID int64, snapshot *model.Snapshot) *model.Observation 
 		observation.CompareCents = &compare
 	}
 	return observation
-}
-
-// sizeInStock reports whether the named size is available in a stored reading.
-func sizeInStock(variants []model.Variant, size string) bool {
-	for _, variant := range variants {
-		if variant.Size == size && variant.Available {
-			return true
-		}
-	}
-	return false
 }
 
 // formatMoney renders minor units for humans: 17300, "USD" -> "$173.00".

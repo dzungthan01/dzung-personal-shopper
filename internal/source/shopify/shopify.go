@@ -196,6 +196,7 @@ func (p productPayload) toSnapshot(currency string) *model.Snapshot {
 	position := sizePosition(p.Options)
 	for _, variant := range p.Variants {
 		snapshot.Variants = append(snapshot.Variants, model.Variant{
+			Name:       variant.Title,
 			Size:       variant.size(position),
 			SKU:        variant.SKU,
 			Available:  variant.Available,

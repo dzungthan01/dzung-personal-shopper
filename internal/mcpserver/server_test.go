@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/dzungthan01/dzung-personal-shopper/internal/detect"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/source"
@@ -146,7 +148,7 @@ func TestAddItemFromReadableStore(t *testing.T) {
 
 	var added addItemOutput
 	call(t, session, "add_item", map[string]any{
-		"url": front.URL + "/products/le-high", "my_size": "28",
+		"url": front.URL + "/products/le-high", "variant": "28",
 	}, &added)
 
 	if !added.AutoTracked {
@@ -165,8 +167,12 @@ func TestAddItemFromReadableStore(t *testing.T) {
 		t.Errorf("Currency = %q, want USD from /meta.json", added.Currency)
 	}
 	// Size 30 is out of stock; only 28 should be listed.
-	if len(added.AvailableSizes) != 1 || added.AvailableSizes[0] != "28" {
-		t.Errorf("AvailableSizes = %v, want [28]", added.AvailableSizes)
+	if len(added.AvailableVariants) != 1 || added.AvailableVariants[0] != `Ridgeway / 32" / 28` {
+		t.Errorf("AvailableVariants = %v, want only the size 28 variant", added.AvailableVariants)
+	}
+	// A bare size matching one variant is stored under the store's full name.
+	if added.Variant != `Ridgeway / 32" / 28` {
+		t.Errorf("Variant = %q, want the full variant name", added.Variant)
 	}
 }
 
@@ -226,7 +232,7 @@ func TestCheckItemDetectsPriceDrop(t *testing.T) {
 
 	var added addItemOutput
 	call(t, session, "add_item", map[string]any{
-		"url": front.URL + "/products/le-high", "my_size": "28",
+		"url": front.URL + "/products/le-high", "variant": "28",
 	}, &added)
 
 	// The store marks it down between checks.
@@ -265,13 +271,13 @@ func TestRecordSnapshotTracksBlockedStore(t *testing.T) {
 
 	var added addItemOutput
 	call(t, session, "add_item", map[string]any{
-		"url": blocked.URL + "/product/coat", "title": "Wool Coat", "my_size": "IT 38",
+		"url": blocked.URL + "/product/coat", "title": "Wool Coat", "variant": "IT 38",
 	}, &added)
 
 	var recorded recordSnapshotOutput
 	call(t, session, "record_snapshot", map[string]any{
 		"item_id": added.ItemID, "price_cents": 89000, "currency": "usd",
-		"available": true, "available_sizes": []string{"IT 38", "IT 40"},
+		"available": true, "available_variants": []string{"IT 38", "IT 40"},
 	}, &recorded)
 
 	if recorded.PriceCents != 89000 {
@@ -287,8 +293,8 @@ func TestRecordSnapshotTracksBlockedStore(t *testing.T) {
 	if entry.Currency != "USD" {
 		t.Errorf("Currency = %q, want it normalized to upper case", entry.Currency)
 	}
-	if entry.MySizeInStock == nil || !*entry.MySizeInStock {
-		t.Error("MySizeInStock = false/nil, want true; IT 38 was recorded as available")
+	if entry.VariantInStock == nil || !*entry.VariantInStock {
+		t.Error("VariantInStock = false/nil, want true; IT 38 was recorded as available")
 	}
 }
 
@@ -343,4 +349,47 @@ func TestRecordSnapshotRejectsBadInput(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAddItemTracksOneProductInTwoVariants(t *testing.T) {
+	front := newStorefront(t)
+	session := connect(t)
+	productURL := front.URL + "/products/le-high"
+
+	var size28, size30, again addItemOutput
+	call(t, session, "add_item", map[string]any{"url": productURL, "variant": "28"}, &size28)
+	call(t, session, "add_item", map[string]any{"url": productURL, "variant": "30"}, &size30)
+	assert.NotEqual(t, size28.ItemID, size30.ItemID, "each variant is its own entry")
+
+	call(t, session, "add_item", map[string]any{"url": productURL, "variant": "28"}, &again)
+	assert.True(t, again.AlreadyTracked)
+	assert.Equal(t, size28.ItemID, again.ItemID)
+
+	// A typed bare size is saved under the full name, so the full name is a duplicate too.
+	var fullName addItemOutput
+	call(t, session, "add_item", map[string]any{"url": productURL, "variant": `Ridgeway / 32" / 28`}, &fullName)
+	assert.True(t, fullName.AlreadyTracked, "typed 28 and its full name are the same variant")
+	assert.Equal(t, size28.ItemID, fullName.ItemID)
+
+	var listed listItemsOutput
+	call(t, session, "list_items", map[string]any{}, &listed)
+	assert.Equal(t, 2, listed.Count)
+}
+
+func TestAddItemRejectsUnknownVariant(t *testing.T) {
+	front := newStorefront(t)
+	session := connect(t)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "add_item", Arguments: map[string]any{"url": front.URL + "/products/le-high", "variant": "99"},
+	})
+	require.NoError(t, err)
+	require.True(t, result.IsError, "an unknown variant must fail so the model can retry")
+
+	text := result.Content[0].(*mcp.TextContent).Text
+	assert.Contains(t, text, `Ridgeway / 32\" / 28`, "the error lists the variants that exist")
+
+	var listed listItemsOutput
+	call(t, session, "list_items", map[string]any{}, &listed)
+	assert.Zero(t, listed.Count, "nothing is added when the variant is rejected")
 }

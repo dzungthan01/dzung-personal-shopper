@@ -51,6 +51,23 @@ func DefaultPath() (string, error) {
 // Open connects to the database at path, creating it if needed, and applies
 // any pending migrations. Pass ":memory:" for tests.
 func Open(dbPath string) (*Store, error) {
+	db, err := connect(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := configureMigrations(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := goose.Up(db, "migrations"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply migrations: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+// connect opens the database file, creating its directory if needed.
+func connect(dbPath string) (*sql.DB, error) {
 	if dbPath != ":memory:" {
 		if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 			return nil, fmt.Errorf("create data directory: %w", err)
@@ -65,23 +82,26 @@ func Open(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
+
+	// One connection, so a PRAGMA always applies to the connection that runs the
+	// next statement; migration 00003 depends on it. SQLite has one writer anyway.
+	// Never hold rows open while issuing another query: it would wait forever.
+	db.SetMaxOpenConns(1)
+
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
+	return db, nil
+}
 
+func configureMigrations() error {
 	goose.SetBaseFS(migrationsFS)
 	goose.SetLogger(log.New(os.Stderr, "goose: ", 0)) // never stdout: that is MCP's JSON-RPC stream
 	if err := goose.SetDialect("sqlite3"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set migration dialect: %w", err)
+		return fmt.Errorf("set migration dialect: %w", err)
 	}
-	if err := goose.Up(db, "migrations"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("apply migrations: %w", err)
-	}
-
-	return &Store{db: db}, nil
+	return nil
 }
 
 // Close releases the database connection.
@@ -152,14 +172,14 @@ func (s *Store) AddItem(ctx context.Context, item *model.Item) (int64, error) {
 		item.AddedAt = time.Now().UTC()
 	}
 	const query = `
-		INSERT INTO items (url, brand_id, source, title, my_size, image_url, notes, added_at)
+		INSERT INTO items (url, brand_id, source, title, variant, image_url, notes, added_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`
 
 	var id int64
 	err := s.db.QueryRowContext(ctx, query,
 		item.URL, item.BrandID, item.Source, item.Title,
-		item.MySize, item.ImageURL, item.Notes, formatTime(item.AddedAt),
+		item.Variant, item.ImageURL, item.Notes, formatTime(item.AddedAt),
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("add item %q: %w", item.URL, err)
@@ -168,7 +188,7 @@ func (s *Store) AddItem(ctx context.Context, item *model.Item) (int64, error) {
 	return id, nil
 }
 
-const itemColumns = `id, url, brand_id, source, title, my_size, image_url, notes, added_at, archived_at`
+const itemColumns = `id, url, brand_id, source, title, variant, image_url, notes, added_at, archived_at`
 
 // ItemByID looks up one item, returning ErrNotFound if absent.
 func (s *Store) ItemByID(ctx context.Context, id int64) (*model.Item, error) {
@@ -180,12 +200,14 @@ func (s *Store) ItemByID(ctx context.Context, id int64) (*model.Item, error) {
 	return item, err
 }
 
-// ItemByURL looks up one item by its URL, returning ErrNotFound if absent.
-func (s *Store) ItemByURL(ctx context.Context, url string) (*model.Item, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+itemColumns+` FROM items WHERE url = ?`, url)
+// ItemByURLAndVariant looks up the entry for one URL and variant, returning
+// ErrNotFound if absent. An empty variant is the entry tracking any variant.
+func (s *Store) ItemByURLAndVariant(ctx context.Context, url, variant string) (*model.Item, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+itemColumns+` FROM items WHERE url = ? AND variant = ?`, url, variant)
 	item, err := scanItem(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("item %q: %w", url, ErrNotFound)
+		return nil, fmt.Errorf("item %q variant %q: %w", url, variant, ErrNotFound)
 	}
 	return item, err
 }
@@ -333,18 +355,17 @@ func scanBrand(source scanner) (*model.Brand, error) {
 func scanItem(source scanner) (*model.Item, error) {
 	var item model.Item
 	var brandID sql.NullInt64
-	var mySize, imageURL, notes, archivedAt sql.NullString
+	var imageURL, notes, archivedAt sql.NullString
 	var addedAt string
 
 	if err := source.Scan(&item.ID, &item.URL, &brandID, &item.Source, &item.Title,
-		&mySize, &imageURL, &notes, &addedAt, &archivedAt); err != nil {
+		&item.Variant, &imageURL, &notes, &addedAt, &archivedAt); err != nil {
 		return nil, err
 	}
 
 	if brandID.Valid {
 		item.BrandID = &brandID.Int64
 	}
-	item.MySize = mySize.String
 	item.ImageURL = imageURL.String
 	item.Notes = notes.String
 

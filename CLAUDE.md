@@ -28,6 +28,8 @@ npx @modelcontextprotocol/inspector ~/go/bin/dzung-personal-shopper start
 - Money is `int64` minor units. Never float.
 - stdio MCP servers speak JSON-RPC on stdout — all logging to stderr.
 - No scraping past bot protection.
+- The SQLite pool is one connection. Never hold rows open while running another
+  query: it waits forever. Collect results, close, then query again.
 
 ## Style
 

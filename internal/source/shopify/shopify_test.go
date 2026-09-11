@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/dzungthan01/dzung-personal-shopper/internal/model"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/source"
 )
 
@@ -105,14 +106,17 @@ func TestFetchResolvesSizeFromOptionsNotOption1(t *testing.T) {
 	if snapshot.Variants[1].Size != "30" {
 		t.Errorf("Variants[1].Size = %q, want 30", snapshot.Variants[1].Size)
 	}
-	if got := snapshot.AvailableSizes(); len(got) != 1 || got[0] != "28" {
-		t.Errorf("AvailableSizes() = %v, want [28]; size 30 is out of stock", got)
+	if got := snapshot.AvailableVariants(); len(got) != 1 || got[0] != `Ridgeway / 32" / 28` {
+		t.Errorf("AvailableVariants() = %v, want the one in-stock variant", got)
 	}
-	if !snapshot.HasSize("28") {
-		t.Error("HasSize(28) = false, want true")
+	if !model.VariantInStock(snapshot.Variants, "28") {
+		t.Error("VariantInStock(28) = false, want true")
 	}
-	if snapshot.HasSize("30") {
-		t.Error("HasSize(30) = true, but that variant is unavailable")
+	if model.VariantInStock(snapshot.Variants, "30") {
+		t.Error("VariantInStock(30) = true, but that variant is unavailable")
+	}
+	if snapshot.Variants[0].Name != `Ridgeway / 32" / 28` {
+		t.Errorf("variant identity not carried through: %+v", snapshot.Variants[0])
 	}
 }
 

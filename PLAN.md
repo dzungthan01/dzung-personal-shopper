@@ -146,7 +146,7 @@ internal/
   discovery/
     search/     SearchProvider iface: tavily, brave, serper, shopmy
     match/      brand+title normalization, scoring, confidence
-  rules/        diff engine: price drop, restock, size-back
+  rules/        diff engine: price drop, sale started, restock, variant-back
   notify/       Notifier iface: ntfy, pushover, smtp
   mcpserver/    tool + resource + prompt handlers
 ```
@@ -194,7 +194,7 @@ comparing the two most recent. Price history is free, and the 14-day price-match
 a query rather than a subsystem.
 
 ```sql
-items(id, url, source, brand, title, my_size, image_url, notes, added_at, archived_at)
+items(id, url, source, brand, title, variant, image_url, notes, added_at, archived_at)  -- UNIQUE(url, variant)
 observations(id, item_id, fetched_at, price_cents, compare_cents, currency,
              available, variants_json)
 alerts(id, item_id, kind, dedupe_key, payload_json, created_at, read_at, notified_at)

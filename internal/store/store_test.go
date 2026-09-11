@@ -96,17 +96,17 @@ func TestItemLifecycle(t *testing.T) {
 		BrandID: &brandID,
 		Source:  "shopify",
 		Title:   "Belvedere Knit Tank Top",
-		MySize:  "M",
+		Variant: "M",
 	}
 	if _, err := store.AddItem(ctx, item); err != nil {
 		t.Fatalf("AddItem() error = %v", err)
 	}
 
-	got, err := store.ItemByURL(ctx, item.URL)
+	got, err := store.ItemByURLAndVariant(ctx, item.URL, "M")
 	if err != nil {
-		t.Fatalf("ItemByURL() error = %v", err)
+		t.Fatalf("ItemByURLAndVariant() error = %v", err)
 	}
-	if got.Title != item.Title || got.MySize != "M" {
+	if got.Title != item.Title || got.Variant != "M" {
 		t.Errorf("round-trip mismatch: got %+v", got)
 	}
 	if got.BrandID == nil || *got.BrandID != brandID {

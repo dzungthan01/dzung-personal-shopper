@@ -1,7 +1,13 @@
 // Package model holds the types shared by storage, sources and the MCP layer.
 package model
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+)
 
 // Brand maps a brand name to the storefront that sells it.
 type Brand struct {
@@ -22,7 +28,7 @@ type Item struct {
 	BrandID    *int64 // nil when the brand is unknown
 	Source     string // which Source fetches it: "shopify" or "manual"
 	Title      string
-	MySize     string
+	Variant    string // the colour/size wanted, as the store names it; "" means any
 	ImageURL   string
 	Notes      string
 	AddedAt    time.Time
@@ -49,13 +55,50 @@ func (o Observation) OnSale() bool {
 	return o.CompareCents != nil && *o.CompareCents > o.PriceCents
 }
 
-// Variant is one purchasable option, usually a size.
+// Variant is one purchasable option: a size, a colour, or a combination.
 type Variant struct {
+	Name       string `json:"name,omitempty"` // the store's full label, e.g. "Light Pistachio / M"
 	Size       string `json:"size"`
 	SKU        string `json:"sku"`
 	Available  bool   `json:"available"`
 	PriceCents int64  `json:"price_cents"`
 }
+
+// Matches reports whether this variant is the one wanted, by its full name or
+// just its size, ignoring case and a word before a number: "IT 38" matches "38".
+func (v Variant) Matches(wanted string) bool {
+	wanted = normaliseLabel(wanted)
+	return wanted != "" && (normaliseLabel(v.Name) == wanted || normaliseLabel(v.Size) == wanted)
+}
+
+// leadingLabel only fires before a digit, so a colour like "US Navy" is untouched.
+var leadingLabel = regexp.MustCompile(`^[a-z]+\s*(\d)`)
+
+func normaliseLabel(label string) string {
+	label = strings.ToLower(strings.TrimSpace(label))
+	return leadingLabel.ReplaceAllString(label, "$1")
+}
+
+// Label is the variant's name, falling back to its size.
+func (v Variant) Label() string {
+	if v.Name != "" {
+		return v.Name
+	}
+	return v.Size
+}
+
+// VariantInStock reports whether any variant matching wanted is available.
+func VariantInStock(variants []Variant, wanted string) bool {
+	for _, variant := range variants {
+		if variant.Matches(wanted) && variant.Available {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrUnknownVariant means the wanted variant is not one the store sells.
+var ErrUnknownVariant = errors.New("unknown variant")
 
 // Snapshot is what a Source returns: a point-in-time reading of a product page.
 // It carries no database identity; the store turns it into an Observation.
@@ -71,26 +114,49 @@ type Snapshot struct {
 	ImageURL     string
 }
 
-// AvailableSizes returns the sizes currently in stock.
-func (s Snapshot) AvailableSizes() []string {
-	var sizes []string
+// AvailableVariants returns the labels of variants currently in stock.
+func (s Snapshot) AvailableVariants() []string {
+	var labels []string
 	for _, variant := range s.Variants {
 		if variant.Available {
-			sizes = append(sizes, variant.Size)
+			labels = append(labels, variant.Label())
 		}
 	}
-	return sizes
+	return labels
 }
 
-// HasSize reports whether the named size is in stock. Matching is exact:
-// v1 does no cross-region size normalization.
-func (s Snapshot) HasSize(size string) bool {
+// ResolveVariant checks a typed variant against the product's variants. A value
+// matching exactly one is normalised to that variant's full name. A snapshot
+// with no variants cannot be checked, so the text is kept as given.
+func (s Snapshot) ResolveVariant(typed string) (string, error) {
+	typed = strings.TrimSpace(typed)
+	if typed == "" || len(s.Variants) == 0 {
+		return typed, nil
+	}
+
+	var matches []Variant
 	for _, variant := range s.Variants {
-		if variant.Size == size && variant.Available {
-			return true
+		if variant.Matches(typed) {
+			matches = append(matches, variant)
 		}
 	}
-	return false
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("%q is not a variant of this product; choose one of %s: %w",
+			typed, s.variantLabels(), ErrUnknownVariant)
+	case 1:
+		return matches[0].Label(), nil
+	default:
+		return typed, nil // e.g. size 28 in two inseams: track any of them
+	}
+}
+
+func (s Snapshot) variantLabels() string {
+	labels := make([]string, 0, len(s.Variants))
+	for _, variant := range s.Variants {
+		labels = append(labels, fmt.Sprintf("%q", variant.Label()))
+	}
+	return strings.Join(labels, ", ")
 }
 
 // AlertKind is what happened. Values are stored verbatim in alerts.kind.
@@ -100,7 +166,7 @@ const (
 	AlertPriceDrop   AlertKind = "price_drop"
 	AlertSaleStarted AlertKind = "sale_started"
 	AlertBackInStock AlertKind = "back_in_stock"
-	AlertMySizeBack  AlertKind = "my_size_back"
+	AlertVariantBack AlertKind = "variant_back"
 )
 
 // Alert is one thing worth telling the user about.
@@ -127,7 +193,7 @@ type AlertPayload struct {
 	Title         string `json:"title,omitempty"`
 	URL           string `json:"url,omitempty"`
 	Currency      string `json:"currency,omitempty"`
-	Size          string `json:"size,omitempty"`
+	Variant       string `json:"variant,omitempty"`
 	PriceCents    int64  `json:"price_cents,omitempty"`
 	PreviousCents int64  `json:"previous_cents,omitempty"`
 	CompareCents  int64  `json:"compare_cents,omitempty"`

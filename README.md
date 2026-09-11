@@ -3,7 +3,7 @@
 [![ci](https://github.com/dzungthan01/dzung-personal-shopper/actions/workflows/ci.yml/badge.svg)](https://github.com/dzungthan01/dzung-personal-shopper/actions/workflows/ci.yml)
 
 An [MCP](https://modelcontextprotocol.io) server that tracks a personal shopping wishlist:
-what you want, what it costs now, what it has cost before, and whether your size is back in
+what you want, what it costs now, what it has cost before, and whether your size or colour is back in
 stock. Written in Go.
 
 You talk to it through Claude:
@@ -20,7 +20,7 @@ You talk to it through Claude:
 
 ## This is an MVP version that can do
 
-* **Track a wishlist** — add any product URL, keep it with your size and notes, archive what you
+* **Track a wishlist** — add any product URL, keep it with the size or colour you want, archive what you
   no longer want without losing its history
 * **Read prices automatically from any Shopify storefront** — price, sale price, per-size stock,
   no API key or account required
@@ -30,7 +30,8 @@ You talk to it through Claude:
   been cheaper?" is answerable
 * **Report what changed** — `check_item` re-reads an item and tells you the price moved, by how
   much, and whether it came back in stock
-* **Tell you if *your* size is in stock**, not just whether the product exists
+* **Tell you if *your* size or colour is in stock**, not just whether the product exists. Track
+  one product in several sizes or colours by adding it once per variant
 * **Detect whether a store is readable before you commit** — `inspect_url` probes a host and says
   whether prices will update on their own
 
@@ -52,7 +53,7 @@ claude mcp add dzung-personal-shopper -- dzung-personal-shopper start
 |---|---|
 | `inspect_url` | Reports whether a store can be read automatically |
 | `add_item` | Adds a product, detects the platform, records the current price if it can |
-| `list_items` | The wishlist with latest price, sale status, and whether your size is in stock |
+| `list_items` | The wishlist with latest price, sale status, and whether your variant is in stock |
 | `check_item` | Re-reads one item now and reports what changed |
 | `record_snapshot` | Logs a price you read yourself |
 | `get_price_history` | Every recorded price, plus lowest and highest ever seen |
@@ -394,6 +395,22 @@ storing the same value twice. That is a duplicate request, not a wrong answer. E
 needs per-key locking or `singleflight`, which is more machinery than a once-per-store fetch
 justifies.
 
+**One entry per URL and variant, enforced by the database.** `UNIQUE(url, variant)` lets one
+product be tracked in several sizes or colours while rejecting true duplicates. Variants are typed
+(`M`, `Black / M`), not read from store-specific link parameters, so the same approach works for any
+retailer. Where the store publishes its variants, the typed value is checked against them and a bare
+`M` is saved under the full name, so `M` and `Light Pistachio / M` land on one entry. A word in front
+of a number is ignored when comparing, so `38` matches `IT 38`. `variant` is
+`NOT NULL DEFAULT ''` rather than nullable, because SQLite treats every `NULL` as distinct and would
+let "any variant" be added twice.
+
+**A table rebuild turns foreign keys off first.** SQLite cannot drop a constraint, so changing
+`UNIQUE(url)` meant rebuilding `items`. With foreign keys on, `DROP TABLE items` cascades and
+silently deletes every observation and alert. The migration disables them for the rebuild, which
+only works because the pool is pinned to one connection: the `PRAGMA` applies per connection, and
+goose runs non-transactional statements through the pool. `TestMigration3PreservesHistory` seeds
+history at version 2, migrates, and fails with *expected 1, actual 0* if the `PRAGMA` is removed.
+
 **The database is local and never leaves the machine.** No server, no account, no telemetry; the
 repo ships the schema, each install grows its own data. The cost is that two machines mean two
 independent wishlists — syncing is the wall the browser extension will eventually hit.
@@ -471,7 +488,7 @@ is worth knowing about at 7am, not whenever you next think to ask. It also comes
 is the always-on process the browser extension will post to.
 
 - [ ] `watch` subcommand polling on a timer, with jitter and per-store rate limits
-- [ ] Diff engine: price drop, restock, your-size-back
+- [ ] Diff engine: price drop, sale started, restock, your-variant-back
 - [ ] Push notifications via ntfy.sh, behind a `Notifier` interface
 - [ ] Idempotent alerting with dedupe keys, so a flapping price does not send forty pings
 - [ ] `launchd` plist so it survives reboots
