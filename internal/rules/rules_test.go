@@ -211,3 +211,12 @@ func TestEvaluateMatchesVariantByFullName(t *testing.T) {
 	assert.Equal(t, model.AlertVariantBack, alerts[0].Kind)
 	assert.Equal(t, "Light Pistachio / M", alerts[0].Payload.Variant)
 }
+
+func TestEveryAlertCarriesTheVariant(t *testing.T) {
+	// Two entries for one product must produce distinguishable pushes.
+	item := model.Item{ID: 7, Title: "Classic Easy Tote", Variant: "Black"}
+	alerts := Evaluate(item, reading(24800, true), reading(21000, true), now)
+	require.Len(t, alerts, 1)
+	assert.Equal(t, model.AlertPriceDrop, alerts[0].Kind)
+	assert.Equal(t, "Black", alerts[0].Payload.Variant)
+}

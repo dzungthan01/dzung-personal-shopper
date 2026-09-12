@@ -75,3 +75,9 @@ func TestVariantMatchesIgnoresLeadingLabel(t *testing.T) {
 	assert.False(t, Variant{Size: "40"}.Matches("IT 38"))
 	assert.False(t, Variant{Name: "US Navy"}.Matches("Navy"), "only a word before a number is dropped")
 }
+
+func TestFormatMoney(t *testing.T) {
+	assert.Equal(t, "$173.00", FormatMoney(17300, "USD"))
+	assert.Equal(t, "€9.05", FormatMoney(905, "eur"))
+	assert.Equal(t, "1450.00 SEK", FormatMoney(145000, "SEK"), "no symbol falls back to the code")
+}

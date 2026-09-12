@@ -2,7 +2,7 @@
 // restocks, and exposes it to an LLM over the Model Context Protocol.
 //
 //	dzung-personal-shopper start   MCP server over stdio; runs only while a client runs it
-//	dzung-personal-shopper watch   long-lived poller; added in step 6
+//	dzung-personal-shopper watch   long-lived poller
 package main
 
 import (
@@ -42,6 +42,8 @@ func run() error {
 	switch cmd := os.Args[1]; cmd {
 	case "start":
 		return runStart(os.Args[2:])
+	case "watch":
+		return runWatch(os.Args[2:])
 	case "migrate":
 		return runMigrate(os.Args[2:])
 	case "version":
@@ -61,6 +63,7 @@ func usage() {
 
 usage:
   dzung-personal-shopper start     run the MCP server over stdio
+  dzung-personal-shopper watch     poll tracked items and send alerts
   dzung-personal-shopper migrate   create the database and apply migrations
   dzung-personal-shopper version   print the version
 `)

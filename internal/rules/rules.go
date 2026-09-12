@@ -27,9 +27,9 @@ func Evaluate(item model.Item, previous, current *model.Observation, now time.Ti
 	// A sale starting is usually also a price drop; reporting both would ping twice.
 	switch {
 	case !previous.OnSale() && current.OnSale():
-		alerts = append(alerts, change.alert(model.AlertSaleStarted, priceValue(current.PriceCents), ""))
+		alerts = append(alerts, change.alert(model.AlertSaleStarted, priceValue(current.PriceCents)))
 	case dropped(previous.PriceCents, current.PriceCents):
-		alerts = append(alerts, change.alert(model.AlertPriceDrop, priceValue(current.PriceCents), ""))
+		alerts = append(alerts, change.alert(model.AlertPriceDrop, priceValue(current.PriceCents)))
 	}
 
 	// With a variant set, only that variant matters; otherwise the item as a whole.
@@ -38,10 +38,10 @@ func Evaluate(item model.Item, previous, current *model.Observation, now time.Ti
 		if len(previous.Variants) > 0 &&
 			!model.VariantInStock(previous.Variants, item.Variant) &&
 			model.VariantInStock(current.Variants, item.Variant) {
-			alerts = append(alerts, change.alert(model.AlertVariantBack, "variant:"+item.Variant, item.Variant))
+			alerts = append(alerts, change.alert(model.AlertVariantBack, "variant:"+item.Variant))
 		}
 	} else if !previous.Available && current.Available {
-		alerts = append(alerts, change.alert(model.AlertBackInStock, "available", ""))
+		alerts = append(alerts, change.alert(model.AlertBackInStock, "available"))
 	}
 
 	return alerts
@@ -66,7 +66,7 @@ type change struct {
 	now               time.Time
 }
 
-func (c change) alert(kind model.AlertKind, value, variant string) model.Alert {
+func (c change) alert(kind model.AlertKind, value string) model.Alert {
 	alert := model.Alert{
 		ItemID:    c.item.ID,
 		Kind:      kind,
@@ -76,7 +76,7 @@ func (c change) alert(kind model.AlertKind, value, variant string) model.Alert {
 			Title:         c.item.Title,
 			URL:           c.item.URL,
 			Currency:      c.current.Currency,
-			Variant:       variant,
+			Variant:       c.item.Variant,
 			PriceCents:    c.current.PriceCents,
 			PreviousCents: c.previous.PriceCents,
 		},

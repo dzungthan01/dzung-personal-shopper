@@ -114,6 +114,23 @@ type Snapshot struct {
 	ImageURL     string
 }
 
+// Observation turns a snapshot into a storable reading for an item.
+func (s Snapshot) Observation(itemID int64) *Observation {
+	observation := &Observation{
+		ItemID:     itemID,
+		FetchedAt:  s.FetchedAt,
+		PriceCents: s.PriceCents,
+		Currency:   s.Currency,
+		Available:  s.Available,
+		Variants:   s.Variants,
+	}
+	if s.CompareCents > 0 {
+		compare := s.CompareCents
+		observation.CompareCents = &compare
+	}
+	return observation
+}
+
 // AvailableVariants returns the labels of variants currently in stock.
 func (s Snapshot) AvailableVariants() []string {
 	var labels []string
@@ -205,4 +222,13 @@ func (p AlertPayload) DropCents() int64 {
 		return p.PreviousCents - p.PriceCents
 	}
 	return 0
+}
+
+// FormatMoney renders minor units for people: 17300, "USD" -> "$173.00".
+func FormatMoney(cents int64, currency string) string {
+	symbol := map[string]string{"USD": "$", "EUR": "€", "GBP": "£"}[strings.ToUpper(currency)]
+	if symbol == "" {
+		return fmt.Sprintf("%d.%02d %s", cents/100, cents%100, strings.ToUpper(currency))
+	}
+	return fmt.Sprintf("%s%d.%02d", symbol, cents/100, cents%100)
 }

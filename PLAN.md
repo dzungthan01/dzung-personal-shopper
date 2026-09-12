@@ -259,20 +259,20 @@ Each step ends with something runnable. One file at a time, reviewed before movi
 | # | Step | Status |
 |---|---|---|
 | 1 | Module + minimal MCP server + `inspect_url` + tests | **done** |
-| 2 | Data layer — SQLite, migrations, model types. No MCP. | next |
-| 3 | `Source` interface + `manual` + `shopify`, fixture-tested | |
-| 4 | Wishlist MCP tools wired to sources | |
-| 5 | **Discovery — Tavily search, matcher, `find_elsewhere`** | |
-| 6 | Watcher + diff engine + ntfy alerts | |
-| 7 | Perks + purchases + price matching | |
-| 8 | README, diagrams, CI, demo | |
+| 2 | Data layer — SQLite, migrations, model types. No MCP. | **done** |
+| 3 | `Source` interface + `manual` + `shopify`, fixture-tested | **done** |
+| 4 | Wishlist MCP tools wired to sources | **done** |
+| 5 | Watcher + diff engine + ntfy alerts + `list_alerts` | **done** |
+| 6 | Browser extension for capture (needs the watcher's endpoint) | next |
+| 7 | Discovery — Tavily search, matcher, `find_elsewhere` | |
+| 8 | Perks + purchases + price matching | |
 
-Discovery precedes the watcher deliberately. The goal is **"show me candidate links, ranked,
-with prices"** — the human clicks through and verifies. That is a search call, a title
-normalizer and a sort, not an identity-resolution problem. Scoping it that way is what makes it
-cheap enough to build early.
+The watcher moved ahead of discovery once it was clear the browser extension posts to an endpoint
+the watcher hosts, making the watcher a prerequisite rather than a follow-up. Discovery stays
+scoped to **"show me candidate links, ranked, with prices"** — the human clicks through and
+verifies, which is a search call, a title normalizer and a sort, not identity resolution.
 
-**Prerequisite for step 5:** a [Tavily](https://tavily.com/) API key.
+**Prerequisite for step 7:** a [Tavily](https://tavily.com/) API key.
 Free tier, 1,000 credits/month, no credit card required.
 
 ---

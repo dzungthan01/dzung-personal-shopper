@@ -34,6 +34,8 @@ func New(version string, dependencies Dependencies) *mcp.Server {
 	registerCheckItem(server, dependencies)
 	registerRecordSnapshot(server, dependencies)
 	registerPriceHistory(server, dependencies)
+	registerListAlerts(server, dependencies)
+	registerAckAlerts(server, dependencies)
 
 	return server
 }

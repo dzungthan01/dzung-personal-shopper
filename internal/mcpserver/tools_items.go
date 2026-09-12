@@ -147,7 +147,7 @@ func registerAddItem(server *mcp.Server, dependencies Dependencies) {
 			return nil, output, nil
 		}
 
-		if _, err := dependencies.Store.AddObservation(ctx, observationFrom(item.ID, snapshot)); err != nil {
+		if _, err := dependencies.Store.AddObservation(ctx, snapshot.Observation(item.ID)); err != nil {
 			return nil, addItemOutput{}, err
 		}
 
@@ -161,7 +161,7 @@ func registerAddItem(server *mcp.Server, dependencies Dependencies) {
 			output.VariantInStock = &inStock
 		}
 		output.Message = fmt.Sprintf("Added %s as item %d at %s.",
-			describe(item.Title, item.Variant), item.ID, formatMoney(snapshot.PriceCents, snapshot.Currency))
+			describe(item.Title, item.Variant), item.ID, model.FormatMoney(snapshot.PriceCents, snapshot.Currency))
 		return nil, output, nil
 	})
 }

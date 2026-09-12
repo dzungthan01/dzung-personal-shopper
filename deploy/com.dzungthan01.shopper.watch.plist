@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs the watcher in the background on macOS. Replace YOUR-USERNAME and
+  YOUR-NTFY-TOPIC, then see the README for the launchctl commands.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dzungthan01.shopper.watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR-USERNAME/go/bin/dzung-personal-shopper</string>
+        <string>watch</string>
+        <string>--interval</string>
+        <string>24h</string>
+        <string>--jitter</string>
+        <string>30m</string>
+    </array>
+
+    <!-- Leave the topic empty to have alerts logged instead of pushed. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SHOPPER_NTFY_TOPIC</key>
+        <string>YOUR-NTFY-TOPIC</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart the watcher if it ever exits. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR-USERNAME/Library/Logs/dzung-personal-shopper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR-USERNAME/Library/Logs/dzung-personal-shopper.log</string>
+</dict>
+</plist>

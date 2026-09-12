@@ -32,11 +32,15 @@ You talk to it through Claude:
   much, and whether it came back in stock
 * **Tell you if *your* size or colour is in stock**, not just whether the product exists. Track
   one product in several sizes or colours by adding it once per variant
+* **Watch in the background and push to your phone** — a `watch` process polls on a timer, works
+  out what counts as news, and sends it. A push that fails is retried on the next pass
+* **Ask Claude what's new** — `list_alerts` shows what the watcher found, in the same words the
+  push used, and `ack_alerts` clears them
 * **Detect whether a store is readable before you commit** — `inspect_url` probes a host and says
   whether prices will update on their own
 
-Not yet built: background monitoring, push notifications, cross-site price comparison. Those are
-designed and specified — see [Roadmap](#roadmap).
+Not yet built: cross-site price comparison and the browser extension. Both are designed and
+specified — see [Roadmap](#roadmap).
 
 ### Install
 
@@ -47,7 +51,45 @@ dzung-personal-shopper migrate     # create the database
 claude mcp add dzung-personal-shopper -- dzung-personal-shopper start
 ```
 
-### The seven tools
+### Running the watcher
+
+`start` only runs while Claude is open, so a second process does the polling.
+
+```bash
+dzung-personal-shopper watch --once      # one pass now, prints what it found
+dzung-personal-shopper watch             # keep running, one pass a day
+```
+
+With no notification service configured it logs alerts instead of pushing them, so it works
+with no setup at all.
+
+**To get pushes on your phone**, install the [ntfy app](https://ntfy.sh) and subscribe it to a
+topic. A topic name is the only credential on the public server, so pick something unguessable:
+
+```bash
+export SHOPPER_NTFY_TOPIC=shopper-7f3k9q2m      # not "dzung-shopper"
+dzung-personal-shopper watch --once
+```
+
+`--ntfy-server` and `--ntfy-token` point it at a private or self-hosted server instead. The ntfy
+server does not run natively on macOS; self-hosting means Docker, and phones then have to reach
+that machine, so the public server is the simpler choice for a laptop.
+
+**To keep it running across reboots**, use the launchd file in `deploy/`:
+
+```bash
+cp deploy/com.dzungthan01.shopper.watch.plist ~/Library/LaunchAgents/
+# edit it: replace YOUR-USERNAME and YOUR-NTFY-TOPIC
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dzungthan01.shopper.watch.plist
+launchctl print gui/$(id -u)/com.dzungthan01.shopper.watch | head    # check it is alive
+tail -f ~/Library/Logs/dzung-personal-shopper.log                    # watch it work
+launchctl bootout gui/$(id -u)/com.dzungthan01.shopper.watch         # stop it
+```
+
+On a laptop the watcher only runs while the machine is awake, so a drop overnight is noticed
+the next time it wakes. For markdowns, which last days, late is fine.
+
+### The nine tools
 
 | Tool | What it does |
 |---|---|
@@ -58,6 +100,8 @@ claude mcp add dzung-personal-shopper -- dzung-personal-shopper start
 | `record_snapshot` | Logs a price you read yourself |
 | `get_price_history` | Every recorded price, plus lowest and highest ever seen |
 | `archive_item` | Removes an item from the active list, keeping its history |
+| `list_alerts` | What the watcher found: drops, sales, restocks |
+| `ack_alerts` | Marks alerts read so they stop showing as new |
 
 ### Which stores can be read automatically
 
@@ -411,9 +455,13 @@ only works because the pool is pinned to one connection: the `PRAGMA` applies pe
 goose runs non-transactional statements through the pool. `TestMigration3PreservesHistory` seeds
 history at version 2, migrates, and fails with *expected 1, actual 0* if the `PRAGMA` is removed.
 
-**The database is local and never leaves the machine.** No server, no account, no telemetry; the
-repo ships the schema, each install grows its own data. The cost is that two machines mean two
-independent wishlists — syncing is the wall the browser extension will eventually hit.
+**The database is local, and only notifications leave the machine.** No server, no account, no
+telemetry; the repo ships the schema, each install grows its own data. The one exception is
+deliberate: if you configure ntfy, the text of an alert (item, price, variant) passes through that
+server so it can reach your phone, and on the public server a topic name is the only thing
+protecting it. Running with no topic keeps everything local, and `--ntfy-server` points at a
+private one. The cost of staying local is that two machines mean two independent wishlists —
+syncing is the wall the browser extension will eventually hit.
 
 ---
 
@@ -460,11 +508,11 @@ The MCP layer's cost to the model's context, measured against a live server:
 
 | | Chars | ~Tokens |
 |---|---|---|
-| Tool schemas, sent once per session | 8,821 | **~2,205** |
+| Tool schemas, sent once per session | 11,509 | **~2,877** |
 | `list_items` with 25 items | 7,920 | **~1,980** |
 | Per wishlist item in that response | 316 | ~79 |
 
-The ~2,200-token schema cost is fixed and paid on every session, which is a direct argument
+The ~2,900-token schema cost is fixed and paid on every session, which is a direct argument
 against adding tools nobody uses. The per-item cost is why `list_items` returns the latest
 reading rather than full history, and why `get_price_history` is a separate call.
 
@@ -480,34 +528,21 @@ the constraint; match quality is.
 
 ### Major features
 
-**1. Background monitoring and notifications** — makes the tool work while you are not looking.
-
-The `watch` process, the diff engine that decides what counts as news, and the push that reaches
-your phone. This is the feature that turns a database into something useful: a price drop at 3am
-is worth knowing about at 7am, not whenever you next think to ask. It also comes first because it
-is the always-on process the browser extension will post to.
-
-- [ ] `watch` subcommand polling on a timer, with jitter and per-store rate limits
-- [ ] Diff engine: price drop, sale started, restock, your-variant-back
-- [ ] Push notifications via ntfy.sh, behind a `Notifier` interface
-- [ ] Idempotent alerting with dedupe keys, so a flapping price does not send forty pings
-- [ ] `launchd` plist so it survives reboots
-
-**2. Browser extension for wishlist capture** — the biggest single change to how the tool is used.
+**1. Browser extension for wishlist capture** — the biggest single change to how the tool is used.
 
 An "add to wishlist" button on any product page, writing straight to the database. It defeats bot
 protection without fighting it: the page is already rendered, in a real browser, in an
 authenticated session, so Mytheresa and SSENSE hand over the price and size availability that a
 server-side fetch gets a `403` for. It needs no new backend — the extension posts the same
 `Snapshot` the manual source already accepts, to a local endpoint hosted by `watch`, which is why
-it follows the watcher rather than leading. And it captures the moment of intent, which is when
+it depends on the watcher already existing. And it captures the moment of intent, which is when
 wishlists actually get filled.
 
 - [ ] Local HTTP endpoint hosted by `watch`
 - [ ] Extension with per-site content scripts, falling back to schema.org `Product` markup
 - [ ] One-click add with size selection
 
-**3. Cross-site price comparison** — find the same item cheaper somewhere else.
+**2. Cross-site price comparison** — find the same item cheaper somewhere else.
 
 Search for a wishlist item by brand and title across other retailers and resale platforms, and
 return ranked candidates with prices. Scoped deliberately: it surfaces links for a human to

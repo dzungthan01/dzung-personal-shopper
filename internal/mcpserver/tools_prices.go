@@ -66,7 +66,7 @@ func registerCheckItem(server *mcp.Server, dependencies Dependencies) {
 			return nil, checkItemOutput{}, err
 		}
 
-		if _, err := dependencies.Store.AddObservation(ctx, observationFrom(item.ID, snapshot)); err != nil {
+		if _, err := dependencies.Store.AddObservation(ctx, snapshot.Observation(item.ID)); err != nil {
 			return nil, checkItemOutput{}, err
 		}
 
@@ -83,7 +83,7 @@ func registerCheckItem(server *mcp.Server, dependencies Dependencies) {
 
 		if previous == nil {
 			output.Message = fmt.Sprintf("First recorded price for %q: %s.",
-				item.Title, formatMoney(snapshot.PriceCents, snapshot.Currency))
+				item.Title, model.FormatMoney(snapshot.PriceCents, snapshot.Currency))
 			return nil, output, nil
 		}
 
@@ -94,15 +94,15 @@ func registerCheckItem(server *mcp.Server, dependencies Dependencies) {
 		switch {
 		case output.ChangeCents < 0:
 			output.Message = fmt.Sprintf("%q dropped %s to %s.", item.Title,
-				formatMoney(-output.ChangeCents, snapshot.Currency),
-				formatMoney(snapshot.PriceCents, snapshot.Currency))
+				model.FormatMoney(-output.ChangeCents, snapshot.Currency),
+				model.FormatMoney(snapshot.PriceCents, snapshot.Currency))
 		case output.ChangeCents > 0:
 			output.Message = fmt.Sprintf("%q rose %s to %s.", item.Title,
-				formatMoney(output.ChangeCents, snapshot.Currency),
-				formatMoney(snapshot.PriceCents, snapshot.Currency))
+				model.FormatMoney(output.ChangeCents, snapshot.Currency),
+				model.FormatMoney(snapshot.PriceCents, snapshot.Currency))
 		default:
 			output.Message = fmt.Sprintf("%q is unchanged at %s.", item.Title,
-				formatMoney(snapshot.PriceCents, snapshot.Currency))
+				model.FormatMoney(snapshot.PriceCents, snapshot.Currency))
 		}
 		if output.BackInStock {
 			output.Message += " It is back in stock."
@@ -175,7 +175,7 @@ func registerRecordSnapshot(server *mcp.Server, dependencies Dependencies) {
 			output.ChangeCents = input.PriceCents - previous.PriceCents
 		}
 		output.Message = fmt.Sprintf("Recorded %s for %q.",
-			formatMoney(input.PriceCents, observation.Currency), item.Title)
+			model.FormatMoney(input.PriceCents, observation.Currency), item.Title)
 		return nil, output, nil
 	})
 }
@@ -239,32 +239,6 @@ func registerPriceHistory(server *mcp.Server, dependencies Dependencies) {
 		}
 		return nil, output, nil
 	})
-}
-
-// observationFrom converts a Source snapshot into a storable observation.
-func observationFrom(itemID int64, snapshot *model.Snapshot) *model.Observation {
-	observation := &model.Observation{
-		ItemID:     itemID,
-		FetchedAt:  snapshot.FetchedAt,
-		PriceCents: snapshot.PriceCents,
-		Currency:   snapshot.Currency,
-		Available:  snapshot.Available,
-		Variants:   snapshot.Variants,
-	}
-	if snapshot.CompareCents > 0 {
-		compare := snapshot.CompareCents
-		observation.CompareCents = &compare
-	}
-	return observation
-}
-
-// formatMoney renders minor units for humans: 17300, "USD" -> "$173.00".
-func formatMoney(cents int64, currency string) string {
-	symbol := map[string]string{"USD": "$", "EUR": "€", "GBP": "£"}[strings.ToUpper(currency)]
-	if symbol == "" {
-		return fmt.Sprintf("%d.%02d %s", cents/100, cents%100, strings.ToUpper(currency))
-	}
-	return fmt.Sprintf("%s%d.%02d", symbol, cents/100, cents%100)
 }
 
 // timeNow is a variable so tests can freeze the clock.

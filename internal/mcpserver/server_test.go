@@ -69,6 +69,12 @@ func newBlockedStore(t *testing.T) *httptest.Server {
 // connect wires a real client to a real server over an in-memory transport, so
 // tests exercise the same path Claude does, schemas included.
 func connect(t *testing.T) *mcp.ClientSession {
+	session, _ := connectWithStore(t)
+	return session
+}
+
+// connectWithStore also hands back the database, for tests that seed it directly.
+func connectWithStore(t *testing.T) (*mcp.ClientSession, *store.Store) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -94,7 +100,7 @@ func connect(t *testing.T) *mcp.ClientSession {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
 	t.Cleanup(func() { session.Close() })
-	return session
+	return session, database
 }
 
 // call invokes a tool and decodes its structured output into target.
