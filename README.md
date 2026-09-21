@@ -16,6 +16,12 @@ You talk to it through Claude:
 >
 > **claude:** 1 item. L'Homme Slim — Ridgeway, $173.00, on sale, size 30 available.
 
+## MVP Demo:
+
+https://github.com/user-attachments/assets/feda22d2-6453-4cc9-98f3-5ee88feb33c5
+
+
+
 ---
 
 ## This is an MVP version that can do
