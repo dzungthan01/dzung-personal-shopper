@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Runs the watcher in the background on macOS. Replace YOUR-USERNAME and
-  YOUR-NTFY-TOPIC, then see the README for the launchctl commands.
+  YOUR-PHONE-NUMBER, then see the README for the launchctl commands.
 -->
 <plist version="1.0">
 <dict>
@@ -19,11 +19,14 @@
         <string>30m</string>
     </array>
 
-    <!-- Leave the topic empty to have alerts logged instead of pushed. -->
+    <!-- Texts go out first; ntfy is only tried when a text fails, and is optional.
+         Leave both empty to have alerts logged instead of sent. -->
     <key>EnvironmentVariables</key>
     <dict>
+        <key>SHOPPER_IMESSAGE_TO</key>
+        <string>YOUR-PHONE-NUMBER</string>
         <key>SHOPPER_NTFY_TOPIC</key>
-        <string>YOUR-NTFY-TOPIC</string>
+        <string></string>
     </dict>
 
     <key>RunAtLoad</key>

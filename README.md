@@ -67,26 +67,11 @@ dzung-personal-shopper watch --once      # one pass now, prints what it found
 dzung-personal-shopper watch             # keep running, one pass a day
 ```
 
-With no notification service configured it logs alerts instead of pushing them, so it works
-with no setup at all.
-
-**To get pushes on your phone**, install the [ntfy app](https://ntfy.sh) and subscribe it to a
-topic. A topic name is the only credential on the public server, so pick something unguessable:
-
-```bash
-export SHOPPER_NTFY_TOPIC=shopper-7f3k9q2m      # not "dzung-shopper"
-dzung-personal-shopper watch --once
-```
-
-`--ntfy-server` and `--ntfy-token` point it at a private or self-hosted server instead. The ntfy
-server does not run natively on macOS; self-hosting means Docker, and phones then have to reach
-that machine, so the public server is the simpler choice for a laptop.
-
 **To keep it running across reboots**, use the launchd file in `deploy/`:
 
 ```bash
 cp deploy/com.dzungthan01.shopper.watch.plist ~/Library/LaunchAgents/
-# edit it: replace YOUR-USERNAME and YOUR-NTFY-TOPIC
+# edit it: replace YOUR-USERNAME and YOUR-PHONE-NUMBER
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dzungthan01.shopper.watch.plist
 launchctl print gui/$(id -u)/com.dzungthan01.shopper.watch | head    # check it is alive
 tail -f ~/Library/Logs/dzung-personal-shopper.log                    # watch it work
@@ -95,6 +80,35 @@ launchctl bootout gui/$(id -u)/com.dzungthan01.shopper.watch         # stop it
 
 On a laptop the watcher only runs while the machine is awake, so a drop overnight is noticed
 the next time it wakes. For markdowns, which last days, late is fine.
+
+### Notifications
+
+Alerts arrive as iMessage texts, with ntfy as a fallback. With neither configured they are only
+logged, so `watch` runs with no setup at all.
+
+```bash
+export SHOPPER_IMESSAGE_TO="+15551234567"       # phone number or Apple ID
+export SHOPPER_NTFY_TOPIC=shopper-7f3k9q2m      # optional fallback; not "dzung-shopper"
+dzung-personal-shopper watch --once
+```
+
+The first text asks macOS for permission to control Messages — approve it once under System
+Settings → Privacy & Security → Automation. Messages has to be signed in to iMessage.
+`--ntfy-server` and `--ntfy-token` point the fallback at a private server instead.
+
+**Fallback policy.** Channels are tried in order and the first to accept the alert ends it, so
+ntfy is only touched when a text fails. Sending to *both* would need per-channel delivery rows —
+`alerts.notified_at` is a single timestamp with no notion of a channel — and two channels do not
+justify the migration. When every channel fails the alert stays unsent and the next pass retries
+it. The one duplicate this allows is a text Messages delivered but reported as failed.
+
+Alert text (item, price, variant) leaves the machine to reach your phone: over iMessage through
+Apple, to your own account; over ntfy through that server, where on the public one the topic name
+is the only thing protecting it. That is why ntfy is the fallback and not the default.
+
+**Next: Twilio.** A sleeping Mac sends no texts, and SMS would cover that. It implements the same
+one-method `Notifier` and joins the chain as a third link, with credentials in the environment —
+there is no user table to hold them.
 
 ### The nine tools
 
