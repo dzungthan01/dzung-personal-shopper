@@ -4,9 +4,12 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Brand maps a brand name to the storefront that sells it.
@@ -231,4 +234,90 @@ func FormatMoney(cents int64, currency string) string {
 		return fmt.Sprintf("%d.%02d %s", cents/100, cents%100, strings.ToUpper(currency))
 	}
 	return fmt.Sprintf("%s%d.%02d", symbol, cents/100, cents%100)
+}
+
+// ParseMoney reads a price off a page into minor units: "173.00" -> 17300. The
+// separator rules below are narrow on purpose. A guess writes a wrong price
+// into an append-only history, and the next pass alerts on a drop that never
+// happened, so an unrecognised format is an error rather than a best effort.
+func ParseMoney(price string) (int64, error) {
+	// Spaces group thousands in Europe, often as U+00A0 rather than a plain one.
+	cleaned := strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, price)
+	cleaned = strings.TrimLeft(cleaned, "$€£")
+	if cleaned == "" {
+		return 0, fmt.Errorf("price %q is empty", price)
+	}
+
+	whole, fraction := cleaned, ""
+	if index := strings.LastIndexAny(cleaned, ".,"); index >= 0 {
+		switch tail := cleaned[index+1:]; len(tail) {
+		case 1, 2:
+			whole, fraction = cleaned[:index], tail
+		case 3:
+			// A thousands separator: "1.495" is 1495, never 1.495.
+		default:
+			return 0, fmt.Errorf("price %q: %q is neither a decimal nor a thousands group", price, tail)
+		}
+	}
+
+	units, err := wholeUnits(whole)
+	if err != nil {
+		return 0, fmt.Errorf("price %q: %w", price, err)
+	}
+	minor, err := minorUnits(fraction)
+	if err != nil {
+		return 0, fmt.Errorf("price %q: %w", price, err)
+	}
+	if units > (math.MaxInt64-minor)/100 {
+		return 0, fmt.Errorf("price %q does not fit in int64 minor units", price)
+	}
+	return units*100 + minor, nil
+}
+
+// wholeUnits reads the part before any decimal, where every separator left is
+// a thousands separator and must group exactly three digits.
+func wholeUnits(whole string) (int64, error) {
+	if whole == "" {
+		return 0, nil // ".50" is fifty cents
+	}
+	groups := strings.FieldsFunc(whole, func(r rune) bool { return r == '.' || r == ',' })
+	if len(groups) != strings.Count(whole, ".")+strings.Count(whole, ",")+1 {
+		return 0, errors.New("a thousands group is empty")
+	}
+	for index, group := range groups {
+		if index > 0 && len(group) != 3 {
+			return 0, fmt.Errorf("thousands group %q is not three digits", group)
+		}
+	}
+	return parseDigits(strings.Join(groups, ""))
+}
+
+// minorUnits reads the decimal part, where one digit means tenths: "5" is 50.
+func minorUnits(fraction string) (int64, error) {
+	if fraction == "" {
+		return 0, nil
+	}
+	if len(fraction) == 1 {
+		fraction += "0"
+	}
+	return parseDigits(fraction)
+}
+
+// parseDigits rejects anything but digits, so a sign or a stray letter cannot
+// slip through ParseInt.
+func parseDigits(digits string) (int64, error) {
+	if digits == "" {
+		return 0, errors.New("no digits")
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("%q is not a number", digits)
+		}
+	}
+	return strconv.ParseInt(digits, 10, 64)
 }

@@ -81,3 +81,51 @@ func TestFormatMoney(t *testing.T) {
 	assert.Equal(t, "€9.05", FormatMoney(905, "eur"))
 	assert.Equal(t, "1450.00 SEK", FormatMoney(145000, "SEK"), "no symbol falls back to the code")
 }
+
+func TestParseMoney(t *testing.T) {
+	accepted := map[string]int64{
+		"173.00":    17300,
+		"173":       17300,
+		"495.5":     49550, // one decimal digit is tenths, not hundredths
+		"1,495.00":  149500,
+		"1.495,00":  149500, // the European reading of the same price
+		"1.495":     149500, // a lone three-digit group is thousands
+		"1 495,00":  149500,
+		"1 495,00":  149500, // stores often group with a non-breaking space
+		"€495,00":   49500,
+		"$1,495.99": 149599,
+		".50":       50,
+		"0":         0,
+		"  173.00 ": 17300,
+	}
+	for price, want := range accepted {
+		cents, err := ParseMoney(price)
+		require.NoError(t, err, price)
+		assert.Equal(t, want, cents, price)
+	}
+
+	rejected := []string{
+		"", "   ", "abc", "495 EUR", "-5.00",
+		"495.1234", // neither a decimal nor a thousands group
+		"1,49.00",  // a two-digit thousands group
+		"1,4950.00",
+		"1,,495.00",
+		",495",
+		"12.34.56",
+	}
+	for _, price := range rejected {
+		_, err := ParseMoney(price)
+		assert.Error(t, err, "%q must not be guessed at", price)
+	}
+}
+
+// ParseMoney is the inverse of FormatMoney wherever the currency has a symbol.
+func TestParseMoneyRoundTrip(t *testing.T) {
+	for _, cents := range []int64{0, 5, 99, 100, 17300, 24800, 149599} {
+		for _, currency := range []string{"USD", "EUR", "GBP"} {
+			parsed, err := ParseMoney(FormatMoney(cents, currency))
+			require.NoError(t, err, FormatMoney(cents, currency))
+			assert.Equal(t, cents, parsed, currency)
+		}
+	}
+}

@@ -424,6 +424,11 @@ wishlists actually get filled.
 - [ ] Local HTTP endpoint hosted by `watch`
 - [ ] Extension with per-site content scripts, falling back to schema.org `Product` markup
 - [ ] One-click add with size selection
+- [ ] Mobile capture, after the desktop path works. Phone browsers are the smaller problem: the
+      endpoint listens on loopback, so a phone cannot reach it without binding to the LAN and
+      leaning on the token alone. An iOS Share Sheet shortcut posting over Tailscale captures the
+      URL with no app to ship — but only the URL, so the price still has to come from a store the
+      watcher can fetch
 
 **2. Cross-site price comparison** — find the same item cheaper somewhere else.
 
