@@ -18,7 +18,8 @@ You talk to it through Claude:
 
 ## MVP Demo:
 
-https://github.com/user-attachments/assets/feda22d2-6453-4cc9-98f3-5ee88feb33c5
+
+https://github.com/user-attachments/assets/eef87d26-8420-42fc-9096-b08f297cadc9
 
 
 
