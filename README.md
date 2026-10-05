@@ -110,6 +110,74 @@ is the only thing protecting it. That is why ntfy is the fallback and not the de
 one-method `Notifier` and joins the chain as a third link, with credentials in the environment —
 there is no user table to hold them.
 
+### Voice agent (ElevenLabs)
+
+ElevenLabs agents run on ElevenLabs' servers, so they cannot launch a local stdio process. `start
+--http` serves the same tools over MCP Streamable HTTP at `/mcp` instead. Without `--http`,
+`start` is the stdio server it always was.
+
+**1. Run it locally.** The token is required in HTTP mode and is read from the environment only,
+so it never shows up in `ps`.
+
+```bash
+export SHOPPER_HTTP_TOKEN=$(openssl rand -hex 32)   # long random string; keep it
+dzung-personal-shopper start --http :8080 \
+  --tools list_items,check_item,get_price_history,list_alerts,add_item
+```
+
+`--tools` (or `SHOPPER_TOOLS`) limits which tools are registered; the default is all nine, in both
+modes. The allowlist above is the recommended one for a voice agent: it leaves out `archive_item`,
+`ack_alerts` and `record_snapshot`, which change or discard data on a misheard sentence. An unknown
+name refuses to start rather than silently dropping a tool.
+
+| Flag / env | Meaning |
+|---|---|
+| `--http` / `SHOPPER_HTTP_ADDR` | Address to serve Streamable HTTP on, e.g. `:8080` |
+| `SHOPPER_HTTP_TOKEN` | Bearer token every `/mcp` request must carry. Required with `--http` |
+| `--insecure-no-auth` | Start without a token. Local testing only; logs a loud warning |
+| `--tools` / `SHOPPER_TOOLS` | Comma-separated tools to register |
+
+`GET /healthz` needs no token and returns `{"status":"ok","version":"..."}` — liveness only, no
+wishlist data. Requests are logged to stderr as method, path, status and duration; headers, query
+strings and the token never are.
+
+Check it with the MCP Inspector: `npx @modelcontextprotocol/inspector`, transport *Streamable
+HTTP*, URL `http://localhost:8080/mcp`, header `Authorization: Bearer $SHOPPER_HTTP_TOKEN`.
+
+**2. Get a public HTTPS URL.** Either GitHub Codespaces (Ports tab → port 8080 → visibility
+*Public*) or `ngrok http 8080`. The agent's URL is that address plus `/mcp`.
+
+**3. Create the agent in the ElevenLabs dashboard.**
+
+1. Create an agent and choose a **Claude** model. Start with Haiku 4.5 for latency; switch to
+   Sonnet if its tool calls are unreliable.
+2. **Add Custom MCP Server**: transport Streamable HTTP, URL ending in `/mcp`, and a request header
+   `Authorization` with value `Bearer <your token>` (store it as a secret if the form offers one).
+3. Enable the server on the agent, then disable any tool you don't want it to have.
+4. Add a tool-call test: *"what's the lowest price my jacket has been?"* must call
+   `get_price_history`.
+
+Suggested agent prompt:
+
+> You are a personal shopping assistant. Use the tools to answer questions about the user's
+> wishlist, current prices, price history, and alerts. Keep spoken answers short. Never invent
+> prices; if a tool fails, say so.
+
+**Security.** The URL is public for as long as the tunnel is up, so the token is the only thing
+between the internet and your wishlist: keep it secret, rotate it if it leaks, and stop the server
+when you are not testing. Requests without a valid token get a `401`. With a token set, the SDK's
+localhost Host-header check is turned off, because a tunnel delivers requests on loopback under
+its public hostname; with `--insecure-no-auth` that check stays on.
+
+**Timeouts.** Headers must arrive within 10s. There is no write timeout, because a Streamable HTTP
+response can be a server-sent event stream that stays open; idle MCP sessions are closed after 30
+minutes instead. On `SIGINT`/`SIGTERM` in-flight calls get 5s to finish before open streams are cut.
+
+**Don't run a stdio instance and an HTTP instance against the same database at the same time.**
+Within one process, concurrent HTTP requests queue on the store's single SQLite connection, so they
+are safe. Across processes only SQLite's 5s busy timeout stands between writers, and an interactive
+server is not where a "database is locked" error should surface.
+
 ### The nine tools
 
 | Tool | What it does |
@@ -200,6 +268,7 @@ internal/
     shopify/  reads any Shopify storefront
     manual/   marker source; never performs I/O
   mcpserver/  MCP translation layer
+  httpserver/ Streamable HTTP transport: bearer auth, /healthz, request logging
 ```
 
 `cmd/` is convention. `internal/` is enforced by the compiler: nothing outside this module can

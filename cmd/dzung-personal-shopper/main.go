@@ -2,6 +2,7 @@
 // restocks, and exposes it to an LLM over the Model Context Protocol.
 //
 //	dzung-personal-shopper start   MCP server over stdio; runs only while a client runs it
+//	dzung-personal-shopper start --http :8080   the same tools over Streamable HTTP
 //	dzung-personal-shopper watch   long-lived poller
 package main
 
@@ -9,13 +10,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dzungthan01/dzung-personal-shopper/internal/detect"
+	"github.com/dzungthan01/dzung-personal-shopper/internal/httpserver"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/mcpserver"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/source"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/source/manual"
@@ -62,7 +67,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `dzung-personal-shopper - wishlist price and stock monitor
 
 usage:
-  dzung-personal-shopper start     run the MCP server over stdio
+  dzung-personal-shopper start     run the MCP server over stdio (--http :8080 for Streamable HTTP)
   dzung-personal-shopper watch     poll tracked items and send alerts
   dzung-personal-shopper migrate   create the database and apply migrations
   dzung-personal-shopper version   print the version
@@ -73,8 +78,17 @@ func runStart(args []string) error {
 	flagSet := flag.NewFlagSet("start", flag.ContinueOnError)
 	userAgent := flagSet.String("user-agent", "", "User-Agent sent to stores (identifies you to store operators)")
 	databasePath := flagSet.String("db", "", "database file (default: XDG data dir)")
+	httpAddress := flagSet.String("http", os.Getenv("SHOPPER_HTTP_ADDR"), "serve Streamable HTTP on this address, e.g. :8080, instead of stdio")
+	insecureNoAuth := flagSet.Bool("insecure-no-auth", false, "allow --http without SHOPPER_HTTP_TOKEN; local testing only")
+	tools := flagSet.String("tools", os.Getenv("SHOPPER_TOOLS"), "comma-separated tools to register (default: all)")
 	if err := flagSet.Parse(args); err != nil {
 		return err
+	}
+
+	// The token comes from the environment only: a flag would show up in ps.
+	token := os.Getenv("SHOPPER_HTTP_TOKEN")
+	if *httpAddress != "" && token == "" && !*insecureNoAuth {
+		return fmt.Errorf("start: --http needs SHOPPER_HTTP_TOKEN set; pass --insecure-no-auth to run without one, locally only")
 	}
 
 	// Stop cleanly on Ctrl-C or SIGTERM.
@@ -91,14 +105,21 @@ func runStart(args []string) error {
 	}
 	defer database.Close()
 
-	server := mcpserver.New(version, mcpserver.Dependencies{
+	server, err := mcpserver.NewWithTools(version, mcpserver.Dependencies{
 		Detector: detect.New(nil, *userAgent),
 		Store:    database,
 		Sources: source.NewRegistry(
 			shopify.New(nil, *userAgent),
 			manual.New(),
 		),
-	})
+	}, parseToolList(*tools))
+	if err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+
+	if *httpAddress != "" {
+		return serveHTTP(ctx, *httpAddress, server, token)
+	}
 
 	fmt.Fprintf(os.Stderr, "dzung-personal-shopper %s: MCP server on stdio\n", version)
 
@@ -109,6 +130,41 @@ func runStart(args []string) error {
 		return fmt.Errorf("start: %w", err)
 	}
 	return nil
+}
+
+// serveHTTP serves the MCP server over Streamable HTTP until ctx is cancelled.
+func serveHTTP(ctx context.Context, address string, server *mcp.Server, token string) error {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if token == "" {
+		logger.Warn("SERVING WITHOUT AUTHENTICATION: anyone who can reach this port can read and change the wishlist; never expose it publicly")
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+	logger.Info("MCP server on Streamable HTTP", "version", version,
+		"address", listener.Addr().String(), "path", httpserver.MCPPath)
+
+	handler := httpserver.Handler(httpserver.Config{
+		Server: server, Version: version, Token: token, Logger: logger,
+	})
+	if err := httpserver.Serve(ctx, httpserver.NewServer(handler), listener); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+	logger.Info("HTTP server stopped")
+	return nil
+}
+
+// parseToolList splits a comma-separated tool list, dropping blanks.
+func parseToolList(list string) []string {
+	var names []string
+	for _, name := range strings.Split(list, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // runMigrate creates the database and applies pending migrations. Open does this
