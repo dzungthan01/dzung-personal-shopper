@@ -66,6 +66,41 @@ func Open(dbPath string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// OpenExisting connects to a database that must already exist, without
+// applying migrations, so doctor can report on the schema instead of fixing it.
+func OpenExisting(dbPath string) (*Store, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("database %s: %w", dbPath, err)
+	}
+	db, err := connect(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := configureMigrations(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+// SchemaVersion reports the applied migration version and the newest one this
+// binary carries.
+func (s *Store) SchemaVersion(ctx context.Context) (current, latest int64, err error) {
+	current, err = goose.GetDBVersionContext(ctx, s.db)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read schema version: %w", err)
+	}
+	migrations, err := goose.CollectMigrations("migrations", 0, goose.MaxVersion)
+	if err != nil {
+		return 0, 0, fmt.Errorf("list migrations: %w", err)
+	}
+	last, err := migrations.Last()
+	if err != nil {
+		return 0, 0, fmt.Errorf("list migrations: %w", err)
+	}
+	return current, last.Version, nil
+}
+
 // connect opens the database file, creating its directory if needed.
 func connect(dbPath string) (*sql.DB, error) {
 	if dbPath != ":memory:" {
