@@ -5,6 +5,8 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -20,24 +22,67 @@ type Dependencies struct {
 	Sources  *source.Registry
 }
 
+// registrations maps each tool name to the function that registers it.
+// TestToolNamesMatchRegistrations keeps the names in step with the tools.
+var registrations = []struct {
+	name     string
+	register func(*mcp.Server, Dependencies)
+}{
+	{"inspect_url", registerInspectURL},
+	{"add_item", registerAddItem},
+	{"list_items", registerListItems},
+	{"archive_item", registerArchiveItem},
+	{"check_item", registerCheckItem},
+	{"record_snapshot", registerRecordSnapshot},
+	{"get_price_history", registerPriceHistory},
+	{"list_alerts", registerListAlerts},
+	{"ack_alerts", registerAckAlerts},
+}
+
+// ToolNames lists every tool this server can register, in registration order.
+func ToolNames() []string {
+	names := make([]string, 0, len(registrations))
+	for _, registration := range registrations {
+		names = append(names, registration.name)
+	}
+	return names
+}
+
 // New builds the MCP server and registers every tool.
 func New(version string, dependencies Dependencies) *mcp.Server {
+	server, err := NewWithTools(version, dependencies, nil)
+	if err != nil {
+		panic(err) // unreachable: an empty allowlist names no unknown tools
+	}
+	return server
+}
+
+// NewWithTools builds the MCP server with only the named tools, or every tool
+// when names is empty. An unknown name is an error, so a typo is not a silent gap.
+func NewWithTools(version string, dependencies Dependencies, names []string) (*mcp.Server, error) {
+	known := ToolNames()
+	var unknown []string
+	for _, name := range names {
+		if !slices.Contains(known, name) {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		return nil, fmt.Errorf("unknown tools %s; known tools are %s",
+			strings.Join(unknown, ", "), strings.Join(known, ", "))
+	}
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "dzung-personal-shopper",
 		Version: version,
 	}, nil)
 
-	registerInspectURL(server, dependencies)
-	registerAddItem(server, dependencies)
-	registerListItems(server, dependencies)
-	registerArchiveItem(server, dependencies)
-	registerCheckItem(server, dependencies)
-	registerRecordSnapshot(server, dependencies)
-	registerPriceHistory(server, dependencies)
-	registerListAlerts(server, dependencies)
-	registerAckAlerts(server, dependencies)
-
-	return server
+	for _, registration := range registrations {
+		if len(names) == 0 || slices.Contains(names, registration.name) {
+			registration.register(server, dependencies)
+		}
+	}
+	return server, nil
 }
 
 // inspectURLInput is the tool's argument struct. The SDK reflects over it to
