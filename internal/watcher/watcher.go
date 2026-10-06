@@ -7,8 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net/url"
 	"sync"
@@ -36,7 +35,7 @@ type Config struct {
 	Store    *store.Store
 	Sources  *source.Registry
 	Notifier notify.Notifier
-	Logger   *log.Logger
+	Logger   *slog.Logger
 
 	PerStoreInterval time.Duration
 	Burst            int
@@ -48,13 +47,13 @@ type Watcher struct {
 	store    *store.Store
 	sources  *source.Registry
 	notifier notify.Notifier
-	logger   *log.Logger
+	logger   *slog.Logger
 	limiters *storeLimiters
 	now      func() time.Time
 }
 
-// Result counts what one pass did. It is what the logs report and what the
-// planned stats subcommand will read.
+// Result counts what one pass did. Checked and Failed are also stored in
+// watcher_runs, which is what stats and doctor read.
 type Result struct {
 	Checked      int
 	Skipped      int // manual items, which have no endpoint to poll
@@ -75,7 +74,7 @@ func New(config Config) (*Watcher, error) {
 		return nil, errors.New("watcher needs a notifier")
 	}
 	if config.Logger == nil {
-		config.Logger = log.New(io.Discard, "", 0)
+		config.Logger = slog.New(slog.DiscardHandler)
 	}
 	if config.PerStoreInterval <= 0 {
 		config.PerStoreInterval = DefaultPerStoreInterval
@@ -106,7 +105,7 @@ func (w *Watcher) Run(ctx context.Context, interval, jitter time.Duration) error
 	}
 	if jitter > 0 {
 		delay := time.Duration(rand.Int63n(int64(jitter)))
-		w.logger.Printf("first pass in %s", delay.Round(time.Second))
+		w.logger.Info("first pass scheduled", "delay", delay.Round(time.Second).String())
 		if err := sleep(ctx, delay); err != nil {
 			return nil // cancelled before starting: not a failure
 		}
@@ -116,14 +115,11 @@ func (w *Watcher) Run(ctx context.Context, interval, jitter time.Duration) error
 	defer ticker.Stop()
 
 	for {
-		result, err := w.RunOnce(ctx)
-		if err != nil && ctx.Err() == nil {
-			w.logger.Printf("pass failed: %v", err)
-		}
+		// RunOnce logs its own outcome; an error here is already recorded.
+		_, _ = w.RunOnce(ctx)
 		if ctx.Err() != nil {
 			return nil
 		}
-		w.logger.Printf("pass done: %+v", result)
 
 		select {
 		case <-ctx.Done():
@@ -133,9 +129,81 @@ func (w *Watcher) Run(ctx context.Context, interval, jitter time.Duration) error
 	}
 }
 
-// RunOnce checks every active item, then sends whatever is still unsent.
-// One item failing does not stop the pass.
+// RunOnce checks every active item, then sends whatever is still unsent, and
+// records the pass in watcher_runs. One item failing does not stop the pass.
 func (w *Watcher) RunOnce(ctx context.Context) (Result, error) {
+	startedAt := w.now()
+	recordContext, cancel := detached(ctx)
+	runID, err := w.store.StartWatcherRun(recordContext, startedAt)
+	cancel()
+	if err != nil {
+		// Losing the run log must not stop the polling it describes.
+		w.logger.Error("could not record run start", "error", err)
+	}
+	w.logger.Info("watcher run started", "run_id", runID)
+
+	result, err := w.pass(ctx)
+	w.finishRun(ctx, runID, startedAt, result, err)
+	return result, err
+}
+
+// detached outlives ctx's cancellation, so a pass cut short by a signal is
+// still recorded, as interrupted.
+func detached(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+}
+
+// finishRun stores and logs how a pass ended.
+func (w *Watcher) finishRun(ctx context.Context, runID int64, startedAt time.Time, result Result, passErr error) {
+	finishedAt := w.now()
+	summary := errorSummary(result, passErr)
+
+	attributes := []any{
+		"run_id", runID,
+		"duration", finishedAt.Sub(startedAt).Round(time.Millisecond).String(),
+		"checked", result.Checked, "skipped", result.Skipped, "failed", result.Failed,
+		"alerts_raised", result.AlertsRaised, "pushed", result.Pushed, "push_failed", result.PushFailed,
+	}
+	switch {
+	case errors.Is(passErr, context.Canceled):
+		w.logger.Warn("watcher run interrupted", attributes...)
+	case summary != "":
+		w.logger.Error("watcher run failed", append(attributes, "error", summary)...)
+	default:
+		w.logger.Info("watcher run finished", attributes...)
+	}
+
+	if runID == 0 {
+		return
+	}
+	recordContext, cancel := detached(ctx)
+	defer cancel()
+	err := w.store.FinishWatcherRun(recordContext, store.WatcherRun{
+		ID: runID, FinishedAt: &finishedAt,
+		ItemsChecked: result.Checked, ItemsFailed: result.Failed, ErrorSummary: summary,
+	})
+	if err != nil {
+		w.logger.Error("could not record run finish", "run_id", runID, "error", err)
+	}
+}
+
+// errorSummary is empty for a pass that worked. Some items failing is normal
+// (a store is down); every item failing means the watcher is not working.
+func errorSummary(result Result, passErr error) string {
+	switch {
+	case errors.Is(passErr, context.Canceled):
+		return "interrupted before the pass finished"
+	case passErr != nil:
+		return passErr.Error()
+	case result.Failed > 0 && result.Checked == 0:
+		return fmt.Sprintf("all %d items failed; see the watcher log for reasons", result.Failed)
+	default:
+		return ""
+	}
+}
+
+// pass does the work of RunOnce.
+func (w *Watcher) pass(ctx context.Context) (Result, error) {
 	var result Result
 
 	items, err := w.store.ListItems(ctx, false)
@@ -154,7 +222,7 @@ func (w *Watcher) RunOnce(ctx context.Context) (Result, error) {
 		raised, err := w.checkItem(ctx, item)
 		if err != nil {
 			result.Failed++
-			w.logger.Printf("item %d (%s): %v", item.ID, item.Title, err)
+			w.logger.Warn("item check failed", "item_id", item.ID, "reason", err.Error())
 			continue
 		}
 		result.Checked++
@@ -209,7 +277,7 @@ func (w *Watcher) checkItem(ctx context.Context, item model.Item) (int, error) {
 func (w *Watcher) deliver(ctx context.Context) (pushed, failed int) {
 	pending, err := w.store.PendingNotifications(ctx, 0)
 	if err != nil {
-		w.logger.Printf("read pending alerts: %v", err)
+		w.logger.Error("could not read pending alerts", "error", err)
 		return 0, 0
 	}
 
@@ -219,11 +287,11 @@ func (w *Watcher) deliver(ctx context.Context) (pushed, failed int) {
 		}
 		if err := w.notifier.Notify(ctx, notify.FromAlert(alert)); err != nil {
 			failed++
-			w.logger.Printf("alert %d not sent: %v", alert.ID, err)
+			w.logger.Warn("alert not sent", "alert_id", alert.ID, "reason", err.Error())
 			continue
 		}
 		if err := w.store.MarkNotified(ctx, []int64{alert.ID}); err != nil {
-			w.logger.Printf("alert %d sent but not recorded: %v", alert.ID, err)
+			w.logger.Error("alert sent but not recorded", "alert_id", alert.ID, "error", err)
 		}
 		pushed++
 	}

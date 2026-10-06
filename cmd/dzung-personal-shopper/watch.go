@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -20,7 +20,7 @@ import (
 	"github.com/dzungthan01/dzung-personal-shopper/internal/watcher"
 )
 
-func runWatch(args []string) error {
+func runWatch(args []string, logger *slog.Logger) error {
 	flagSet := flag.NewFlagSet("watch", flag.ContinueOnError)
 	databasePath := flagSet.String("db", "", "database file (default: XDG data dir)")
 	interval := flagSet.Duration("interval", 24*time.Hour, "how often to check every item")
@@ -48,8 +48,6 @@ func runWatch(args []string) error {
 	}
 	defer database.Close()
 
-	logger := log.New(os.Stderr, "watch: ", log.LstdFlags)
-
 	notifier, err := buildNotifier(*imessageTo, *ntfyServer, *ntfyTopic, *ntfyToken, logger)
 	if err != nil {
 		return err
@@ -65,22 +63,18 @@ func runWatch(args []string) error {
 		return err
 	}
 	if *once {
-		result, err := poller.RunOnce(ctx)
-		if err != nil {
-			return err
-		}
-		logger.Printf("pass done: %+v", result)
-		return nil
+		_, err := poller.RunOnce(ctx)
+		return err
 	}
 
-	logger.Printf("watching every %s, database %s", *interval, path)
+	logger.Info("watching", "interval", interval.String(), "database", path)
 	return poller.Run(ctx, *interval, *jitter)
 }
 
 // buildNotifier chains the configured channels, iMessage first and ntfy behind
 // it. With neither configured alerts are only logged, so watch still runs with
 // no setup at all.
-func buildNotifier(imessageTo, ntfyServer, ntfyTopic, ntfyToken string, logger *log.Logger) (notify.Notifier, error) {
+func buildNotifier(imessageTo, ntfyServer, ntfyTopic, ntfyToken string, logger *slog.Logger) (notify.Notifier, error) {
 	var channels []notify.Channel
 
 	if imessageTo != "" {
@@ -104,7 +98,7 @@ func buildNotifier(imessageTo, ntfyServer, ntfyTopic, ntfyToken string, logger *
 	}
 
 	if len(channels) == 0 {
-		logger.Print("no iMessage recipient or ntfy topic set: alerts will be logged, not sent")
+		logger.Warn("no iMessage recipient or ntfy topic set: alerts will be logged, not sent")
 		return notify.Log{Writer: os.Stderr}, nil
 	}
 
@@ -113,7 +107,7 @@ func buildNotifier(imessageTo, ntfyServer, ntfyTopic, ntfyToken string, logger *
 	for _, channel := range channels {
 		names = append(names, channel.Name)
 	}
-	logger.Printf("sending alerts via %s", strings.Join(names, ", then "))
+	logger.Info("sending alerts", "channels", strings.Join(names, ", then "))
 
-	return notify.NewFallback(logger, channels...)
+	return notify.NewFallback(slog.NewLogLogger(logger.Handler(), slog.LevelWarn), channels...)
 }

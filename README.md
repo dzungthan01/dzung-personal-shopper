@@ -178,6 +178,64 @@ Within one process, concurrent HTTP requests queue on the store's single SQLite 
 are safe. Across processes only SQLite's 5s busy timeout stands between writers, and an interactive
 server is not where a "database is locked" error should surface.
 
+### Operating it
+
+The watcher runs unattended, so it records every pass in a `watcher_runs` table: when it started
+and finished, how many items it checked, how many failed, and a one-line error summary when the
+pass itself failed. Two subcommands read it back. Neither changes the database.
+
+**`stats`** prints what the database holds and how the watcher has been doing:
+
+```console
+$ dzung-personal-shopper stats
+database      /Users/you/.local/share/dzung-personal-shopper/shopper.db (96.0 KB)
+items         12 active, 3 archived
+observations  418
+alerts        2 pending, 31 acknowledged
+watcher runs  1 in 24h (0 failed), 7 in 7d (1 failed)
+last success  2026-10-05 09:00 UTC (3 hours ago)
+```
+
+`stats --json` prints the same numbers as JSON, with `last_success_age_seconds` in place of
+"3 hours ago". *Pending* alerts are ones `ack_alerts` has not marked read yet.
+
+**`doctor`** runs three checks, prints `PASS`, `WARN` or `FAIL` for each, then a verdict. It exits
+`1` if any check fails, so it can sit in a cron job or a shell prompt:
+
+```console
+$ dzung-personal-shopper doctor
+PASS  database    /Users/you/.local/share/dzung-personal-shopper/shopper.db is writable
+PASS  migrations  schema at version 4, up to date
+FAIL  watcher     last success 31 hours ago, over the 24h limit; latest run failed: all 12 items failed; see the watcher log for reasons
+verdict: unhealthy: 1 check failed
+```
+
+| Check | Passes when | Otherwise |
+|---|---|---|
+| `database` | the path resolves, the file exists, and both it and its directory are writable (SQLite writes its `-wal` file beside it) | `FAIL`: run `migrate`, or fix permissions |
+| `migrations` | every migration this binary carries is applied | `FAIL` when one is pending: run `migrate`. `WARN` when the database is newer than the binary |
+| `watcher` | the last successful pass finished within `--max-watcher-age` (default `24h`) | `WARN` if the watcher has never run, or the newest pass failed after a recent success. `FAIL` if the last success is too old, or there has never been one |
+
+`doctor --json` prints the report as JSON and keeps the same exit code.
+
+**What counts as a failed pass.** A pass fails when it errors out (the database is unreadable, or
+a signal interrupts it) or when *every* item it tried failed, which usually means the network or
+the machine is the problem rather than a store. One store being down is normal: those items are
+counted in `items_failed` and the pass still succeeds. A pass killed outright never records its
+finish, and simply stops counting as a success.
+
+**Logs.** Every subcommand logs JSON lines to stderr, never stdout, which `start` reserves for
+MCP. `watch` logs each pass's start and finish with its counts, and each item that failed with its
+id and the reason. Set the level with `SHOPPER_LOG_LEVEL` (`debug`, `info`, `warn` or `error`;
+default `info`):
+
+```console
+$ SHOPPER_LOG_LEVEL=debug dzung-personal-shopper watch --once
+{"time":"2026-10-05T09:00:00Z","level":"INFO","msg":"watcher run started","run_id":42}
+{"time":"2026-10-05T09:00:03Z","level":"WARN","msg":"item check failed","item_id":7,"reason":"fetch product \"float-legging\": GET https://girlfriend.com/products/float-legging.js: 503 Service Unavailable"}
+{"time":"2026-10-05T09:00:09Z","level":"INFO","msg":"watcher run finished","run_id":42,"duration":"9.1s","checked":11,"skipped":3,"failed":1,"alerts_raised":1,"pushed":1,"push_failed":0}
+```
+
 ### The nine tools
 
 | Tool | What it does |
@@ -259,11 +317,14 @@ flowchart TB
 ```
 
 ```
-cmd/dzung-personal-shopper/   subcommands: start · migrate · version
+cmd/dzung-personal-shopper/   subcommands: start · watch · migrate · stats · doctor · version
 internal/
   detect/     platform detection via /meta.json
   model/      shared types: Item, Observation, Snapshot, Variant, Brand
   store/      SQLite, embedded goose migrations
+  watcher/    the polling pass behind watch; records each run
+  health/     doctor's checks and stats' counts
+  logging/    the JSON logger, levelled by SHOPPER_LOG_LEVEL
   source/     the Source interface
     shopify/  reads any Shopify storefront
     manual/   marker source; never performs I/O
@@ -291,8 +352,8 @@ WAL mode and never talk to each other.
 * One binary, so there is nothing extra to install or version.
 
 **Cons**
-* Two things to keep running, and `watch` failing silently is possible until a `doctor`
-  subcommand exists.
+* Two things to keep running. `watch` records every pass, so `doctor` catches one that has
+  stopped or keeps failing — but only when something runs `doctor`.
 * SQLite write contention is real, though WAL makes it a non-issue at this scale.
 * Both processes must resolve the same database path, which is why it is XDG-based rather than
   relative to the working directory.
@@ -514,19 +575,21 @@ verify, and never claims two listings are definitely the same item.
 
 ### Observability
 
-Nothing currently reports on itself. The measured figures in [Resource usage](#resource-usage)
+The watcher records every pass, and `stats` and `doctor` read it back (see
+[Operating it](#operating-it)). Beyond that, the measured figures in [Resource usage](#resource-usage)
 came from ad-hoc probes, which is fine for a snapshot and useless for noticing that the watcher
 has been failing against one store for a week. Capacity questions the tool should answer about
 itself rather than requiring a benchmark:
 
-- [ ] Structured logging to stderr, levelled, so `watch` leaves a trail worth reading
+- [x] Structured logging to stderr, levelled, so `watch` leaves a trail worth reading
 - [ ] Request counters per store: attempts, failures, HTTP status distribution, latency
 - [ ] Currency cache hit and miss counts, to confirm the once-per-store assumption holds
-- [ ] Observations written per day, and database size, to keep the storage projection honest
+- [ ] Observations written per day (database size and the observation total are in `stats`)
 - [ ] Rate-limit and backoff events, so a store quietly throttling us is visible
 - [ ] Token cost per tool response, to catch a schema change bloating every session
-- [ ] A `stats` subcommand printing all of the above, and a `doctor` that checks whether the
-      schema is current, `watch` is alive, and any API keys still work
+- [x] A `stats` subcommand with counts and watcher run history, and a `doctor` that checks
+      whether the schema is current and `watch` is alive
+- [ ] `stats` covering the counters above, and `doctor` checking that API keys still work
 
 ### Smaller follow-ups
 

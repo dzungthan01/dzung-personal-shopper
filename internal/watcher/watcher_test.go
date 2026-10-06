@@ -51,6 +51,7 @@ type storefront struct {
 	mutex      sync.Mutex
 	priceCents int
 	inStock    bool
+	failing    bool
 }
 
 func newStorefront(t *testing.T) *storefront {
@@ -58,8 +59,13 @@ func newStorefront(t *testing.T) *storefront {
 	front := &storefront{priceCents: 24800, inStock: true}
 	front.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		front.mutex.Lock()
-		price, inStock := front.priceCents, front.inStock
+		price, inStock, failing := front.priceCents, front.inStock, front.failing
 		front.mutex.Unlock()
+
+		if failing && r.URL.Path != "/meta.json" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/meta.json":
@@ -88,6 +94,12 @@ func (f *storefront) setStock(inStock bool) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 	f.inStock = inStock
+}
+
+func (f *storefront) setFailing(failing bool) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	f.failing = failing
 }
 
 func btoa(b bool) string {
@@ -245,6 +257,95 @@ func TestNewRejectsMissingCollaborators(t *testing.T) {
 	assert.Error(t, err)
 	_, err = New(Config{Store: &store.Store{}, Sources: source.NewRegistry()})
 	assert.Error(t, err, "a notifier is required")
+}
+
+func TestRunOnceRecordsASuccessfulRun(t *testing.T) {
+	front := newStorefront(t)
+	watcher, database := newWatcher(t, front, &recorder{})
+	addItem(t, database, front, shopify.Name)
+	ctx := context.Background()
+
+	_, err := watcher.RunOnce(ctx)
+	require.NoError(t, err)
+
+	run, err := database.LatestWatcherRun(ctx)
+	require.NoError(t, err)
+	assert.True(t, run.Succeeded())
+	assert.Equal(t, 1, run.ItemsChecked)
+	assert.Equal(t, 0, run.ItemsFailed)
+	assert.Empty(t, run.ErrorSummary)
+}
+
+func TestRunOnceRecordsAFailedRunAndKeepsGoing(t *testing.T) {
+	front := newStorefront(t)
+	watcher, database := newWatcher(t, front, &recorder{})
+	addItem(t, database, front, shopify.Name)
+	ctx := context.Background()
+
+	front.setFailing(true)
+	result, err := watcher.RunOnce(ctx)
+	require.NoError(t, err, "an item failing is not a pass error")
+	assert.Equal(t, 1, result.Failed)
+
+	run, err := database.LatestWatcherRun(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, run.FinishedAt, "a failed run is still finished")
+	assert.False(t, run.Succeeded())
+	assert.Equal(t, 0, run.ItemsChecked)
+	assert.Equal(t, 1, run.ItemsFailed)
+	assert.Equal(t, "all 1 items failed; see the watcher log for reasons", run.ErrorSummary)
+
+	_, err = database.LastSuccessfulWatcherRun(ctx)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// The store recovers; the next pass works and is recorded as a success.
+	front.setFailing(false)
+	_, err = watcher.RunOnce(ctx)
+	require.NoError(t, err)
+	last, err := database.LastSuccessfulWatcherRun(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, last.ItemsChecked)
+
+	runs, failures, err := database.CountWatcherRuns(ctx, time.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 2, runs)
+	assert.Equal(t, 1, failures)
+}
+
+func TestPartialFailureIsNotAFailedRun(t *testing.T) {
+	healthy := newStorefront(t)
+	broken := newStorefront(t)
+	broken.setFailing(true)
+	watcher, database := newWatcher(t, healthy, &recorder{})
+	addItem(t, database, healthy, shopify.Name)
+	addItem(t, database, broken, shopify.Name)
+	ctx := context.Background()
+
+	result, err := watcher.RunOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Checked)
+	assert.Equal(t, 1, result.Failed)
+
+	run, err := database.LatestWatcherRun(ctx)
+	require.NoError(t, err)
+	assert.True(t, run.Succeeded(), "one store down is normal; the failure count records it")
+	assert.Equal(t, 1, run.ItemsFailed)
+}
+
+func TestCancelledRunIsRecordedAsInterrupted(t *testing.T) {
+	front := newStorefront(t)
+	watcher, database := newWatcher(t, front, &recorder{})
+	addItem(t, database, front, shopify.Name)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := watcher.RunOnce(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+
+	run, err := database.LatestWatcherRun(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, run.FinishedAt)
+	assert.Equal(t, "interrupted before the pass finished", run.ErrorSummary)
 }
 
 func firstPass(t *testing.T, watcher *Watcher, ctx context.Context) error {

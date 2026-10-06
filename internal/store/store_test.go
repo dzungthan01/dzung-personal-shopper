@@ -25,7 +25,7 @@ func openTestStore(t *testing.T) *Store {
 func TestMigrationsApply(t *testing.T) {
 	store := openTestStore(t)
 
-	for _, table := range []string{"brands", "items", "observations", "goose_db_version"} {
+	for _, table := range []string{"brands", "items", "observations", "watcher_runs", "goose_db_version"} {
 		var name string
 		err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
 		if err != nil {

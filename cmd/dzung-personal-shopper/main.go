@@ -4,12 +4,15 @@
 //	dzung-personal-shopper start   MCP server over stdio; runs only while a client runs it
 //	dzung-personal-shopper start --http :8080   the same tools over Streamable HTTP
 //	dzung-personal-shopper watch   long-lived poller
+//	dzung-personal-shopper stats   counts, and how the watcher has been doing
+//	dzung-personal-shopper doctor  health checks; exits 1 if any fails
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/dzungthan01/dzung-personal-shopper/internal/detect"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/httpserver"
+	"github.com/dzungthan01/dzung-personal-shopper/internal/logging"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/mcpserver"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/source"
 	"github.com/dzungthan01/dzung-personal-shopper/internal/source/manual"
@@ -32,25 +36,37 @@ import (
 var version = "dev"
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "dzung-personal-shopper: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	if len(os.Args) < 2 {
+// run dispatches a subcommand. Reports go to output; logs always go to stderr,
+// because in start, stdout carries MCP's JSON-RPC stream.
+func run(args []string, output io.Writer) error {
+	if len(args) < 1 {
 		usage()
 		return fmt.Errorf("no subcommand given")
 	}
 
-	switch cmd := os.Args[1]; cmd {
+	logger, err := logging.New(os.Stderr, os.Getenv(logging.LevelVariable))
+	if err != nil {
+		logger.Warn("bad log level", "error", err)
+	}
+	slog.SetDefault(logger)
+
+	switch command := args[0]; command {
 	case "start":
-		return runStart(os.Args[2:])
+		return runStart(args[1:], logger)
 	case "watch":
-		return runWatch(os.Args[2:])
+		return runWatch(args[1:], logger)
 	case "migrate":
-		return runMigrate(os.Args[2:])
+		return runMigrate(args[1:])
+	case "stats":
+		return runStats(args[1:], output)
+	case "doctor":
+		return runDoctor(args[1:], output)
 	case "version":
 		fmt.Println(version)
 		return nil
@@ -59,7 +75,7 @@ func run() error {
 		return nil
 	default:
 		usage()
-		return fmt.Errorf("unknown subcommand %q", cmd)
+		return fmt.Errorf("unknown subcommand %q", command)
 	}
 }
 
@@ -70,11 +86,13 @@ usage:
   dzung-personal-shopper start     run the MCP server over stdio (--http :8080 for Streamable HTTP)
   dzung-personal-shopper watch     poll tracked items and send alerts
   dzung-personal-shopper migrate   create the database and apply migrations
+  dzung-personal-shopper stats     print counts and watcher run history
+  dzung-personal-shopper doctor    check the database, schema and watcher
   dzung-personal-shopper version   print the version
 `)
 }
 
-func runStart(args []string) error {
+func runStart(args []string, logger *slog.Logger) error {
 	flagSet := flag.NewFlagSet("start", flag.ContinueOnError)
 	userAgent := flagSet.String("user-agent", "", "User-Agent sent to stores (identifies you to store operators)")
 	databasePath := flagSet.String("db", "", "database file (default: XDG data dir)")
@@ -118,23 +136,25 @@ func runStart(args []string) error {
 	}
 
 	if *httpAddress != "" {
-		return serveHTTP(ctx, *httpAddress, server, token)
+		return serveHTTP(ctx, *httpAddress, server, token, logger)
 	}
 
-	fmt.Fprintf(os.Stderr, "dzung-personal-shopper %s: MCP server on stdio\n", version)
+	logger.Info("mcp server starting", "version", version, "transport", "stdio", "database", path)
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		if ctx.Err() != nil {
+			logger.Info("mcp server stopped", "reason", "signal")
 			return nil // shutting down on a signal is not a failure
 		}
+		logger.Error("mcp server stopped", "error", err)
 		return fmt.Errorf("start: %w", err)
 	}
+	logger.Info("mcp server stopped", "reason", "client disconnected")
 	return nil
 }
 
 // serveHTTP serves the MCP server over Streamable HTTP until ctx is cancelled.
-func serveHTTP(ctx context.Context, address string, server *mcp.Server, token string) error {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+func serveHTTP(ctx context.Context, address string, server *mcp.Server, token string, logger *slog.Logger) error {
 	if token == "" {
 		logger.Warn("SERVING WITHOUT AUTHENTICATION: anyone who can reach this port can read and change the wishlist; never expose it publicly")
 	}
